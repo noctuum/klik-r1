@@ -10,18 +10,29 @@ uniq = "00:00:00:00:00:00"
 # volume_repeat_ms = 1500, tolerance = 16,
 # center = { x = 1904, y = 1904 }, camera = { x = 2048, y = 3424 }.
 
-# One profile. The daemon refuses a second one, since this build has no rules
-# to choose between them. Up and Down scroll, and the center button sends a
-# key. A held Up or Down is its tap followed by ticks, so the tap binding
-# keeps the wheel turning for as long as the button is held; neither has a
-# hold of its own.
+# One profile here; several need the rules shown at the end. Up and Down
+# scroll, and the center button sends a key. A held Up or Down is its tap
+# followed by ticks, so the tap binding keeps the wheel turning for as long as
+# the button is held; neither has a hold of its own.
 #
 # The actions of this build:
-#   input.key    key = "KEY_1", a kernel key name, or a chord such as
-#                "KEY_LEFTCTRL+KEY_A"; a media key is a key, "KEY_PLAYPAUSE"
-#   input.wheel  direction = "up" or "down", and aim = false to leave the
-#                cursor where it is
-#   input.click  the left button, no parameters
+#   input.key             key = "KEY_1", a kernel key name, or a chord such as
+#                         "KEY_LEFTCTRL+KEY_A"; a media key is a key,
+#                         "KEY_PLAYPAUSE"
+#   input.wheel           direction = "up" or "down", and aim = false to leave
+#                         the cursor where it is
+#   input.click           the left button, no parameters
+#   kwin.desktop.next     the next virtual desktop; kwin.desktop.prev the one
+#                         before
+#   kwin.window.activate  class = "codium" or title = "Notes", matched whole
+#   script.run            command = "notify-send hi", run by sh; wait = true
+#                         to wait for it; limit_ms, 10000 if left out, after
+#                         which it is killed
+#   profile.set           name = "media", kept until the next switch
+#   profile.next          the next profile of the file
+#   profile.auto          back to the rules
+#   profile.hold          name = "media" while the button is held; binds a
+#                         hold only
 [profiles.reading.bindings]
 "beauty-r1.up:tap"      = { action = "input.wheel", direction = "up" }
 "beauty-r1.down:tap"    = { action = "input.wheel", direction = "down" }
@@ -30,8 +41,8 @@ uniq = "00:00:00:00:00:00"
 # The wheel: 40 units an event, 40 more every 10 events, 120 at most.
 # aim_x and aim_y are the point of the window in front that the cursor is put
 # on before a series of wheel events, as fractions of its width and height.
-# This build has no desktop module to find that window, so the wheel goes
-# where the cursor is.
+# The kwin module finds that window; without it the wheel goes where the
+# cursor is.
 [modules.input]
 hi_res_per_event = 40
 hi_res_step = 40
@@ -42,3 +53,18 @@ aim_y = 0.3
 
 [debug]
 enabled = true
+
+# Several profiles and the rules between them. `klik preset apply media` adds
+# the profile media to this file; with the two rules below, reading is active
+# while the editor is in front and media anywhere else. The first rule whose
+# conditions all hold wins, and the last one, with no condition, is the
+# default. A condition is a fact and its value, and a value with * or ? is a
+# pattern. The facts are window.class, window.title and desktop.current;
+# `klik facts --wait 3` prints them for the window in front three seconds on.
+#
+# [[rules]]
+# when = { window.class = "codium" }
+# use = "reading"
+#
+# [[rules]]
+# use = "media"

@@ -564,4 +564,18 @@ mod tests {
             .expect("the example is accepted");
         klik_linux::keys::resolve(&assembled.keys).expect("every key of the example is a key");
     }
+
+    /// The rules the example shows in comments, taken out of them, with the
+    /// preset they name added: what a user gets by following the example.
+    #[cfg(feature = "kwin")]
+    #[test]
+    fn the_rules_the_example_shows_are_accepted_with_the_media_preset() {
+        let example = include_str!("../../packaging/klik.example.toml")
+            .replace("# [[rules]]", "[[rules]]")
+            .replace("# when = ", "when = ")
+            .replace("# use = ", "use = ");
+        let text = crate::preset::apply(&example, "media").expect("the preset applies");
+        let assembled = assemble(&text).expect("the example with its rules is accepted");
+        assert_eq!(assembled.selection.order(), ["reading", "media"]);
+    }
 }

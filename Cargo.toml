@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core"]
+members = ["core", "devices/beauty-r1"]
 
 [workspace.package]
 edition = "2024"

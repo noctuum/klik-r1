@@ -9,4 +9,9 @@ pub enum EventError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConfigError {}
+pub enum ConfigError {
+    #[error("the device section lacks {0}")]
+    MissingDeviceKey(&'static str),
+    #[error("the device key {key} is not {expected}")]
+    BadDeviceValue { key: String, expected: &'static str },
+}

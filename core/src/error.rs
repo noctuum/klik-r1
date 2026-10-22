@@ -36,6 +36,8 @@ pub enum ConfigError {
     RuleAfterDefault(usize),
     #[error("rule {rule}: the condition on {fact} is not text")]
     BadCondition { rule: usize, fact: String },
+    #[error("rule {rule} reads the fact {fact}, which no module of this build publishes")]
+    UnknownFact { rule: usize, fact: String },
     #[error("malformed binding key {0}, which has to be device.button:kind")]
     BadBindingKey(String),
     #[error("binding {key}: the action {action} has to be module.action")]

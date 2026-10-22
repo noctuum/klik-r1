@@ -2,7 +2,108 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::config::Rule;
-use crate::module::Profiles;
+use crate::error::ConfigError;
+use crate::module::{
+    ActionSpec, Fault, Module, ParamKind, ParamSpec, Press, PressEvent, Profiles, Services,
+};
+use crate::press::PressKind;
+
+const NAME: ParamSpec = ParamSpec {
+    name: "name",
+    kind: ParamKind::Profile,
+    required: true,
+};
+
+/// The four actions that switch the profile by hand.
+pub const PROFILE_ACTIONS: [ActionSpec; 4] = [
+    ActionSpec {
+        module: "profile",
+        name: "set",
+        params: &[NAME],
+        ..ActionSpec::PLAIN
+    },
+    ActionSpec {
+        module: "profile",
+        name: "next",
+        ..ActionSpec::PLAIN
+    },
+    ActionSpec {
+        module: "profile",
+        name: "auto",
+        ..ActionSpec::PLAIN
+    },
+    ActionSpec {
+        module: "profile",
+        name: "hold",
+        params: &[NAME],
+        hold_only: true,
+        ..ActionSpec::PLAIN
+    },
+];
+
+/// One of the four on the press it is bound to. `set`, `next` and `auto`
+/// act on the start of a press; `hold` holds on the start and releases on
+/// the end. `next` steps from the profile the press was looked up in.
+pub fn run_profile_action(
+    action: &str,
+    params: &toml::Table,
+    press: &Press,
+    profiles: &mut dyn Profiles,
+) -> Result<(), Fault> {
+    let name = || {
+        params
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+    };
+    let start = matches!(press.event, PressEvent::Start(_));
+    match action {
+        "set" if start => profiles.set(name()),
+        "next" if start => profiles.next_after(press.profile),
+        "auto" if start => profiles.auto(),
+        "hold" if press.event == PressEvent::Start(PressKind::Hold) => {
+            profiles.hold(press.device, press.button, name())
+        }
+        "hold" if press.event == PressEvent::End => profiles.release(press.device, press.button),
+        "set" | "next" | "auto" | "hold" => {}
+        other => return Err(format!("profile has no action {other}").into()),
+    }
+    Ok(())
+}
+
+/// The profile actions as a module, through the `profiles` service.
+#[derive(Debug, Default)]
+pub struct ProfileActions;
+
+impl Module for ProfileActions {
+    fn name(&self) -> &'static str {
+        "profile"
+    }
+
+    fn actions(&self) -> &'static [ActionSpec] {
+        &PROFILE_ACTIONS
+    }
+
+    fn configure(&mut self, section: Option<&toml::Table>) -> Result<(), ConfigError> {
+        match section {
+            Some(section) if !section.is_empty() => Err(ConfigError::Module(
+                "profile".to_string(),
+                "takes no settings".to_string(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn run(
+        &mut self,
+        action: &str,
+        params: &toml::Table,
+        press: &Press,
+        services: &mut Services,
+    ) -> Result<(), Fault> {
+        run_profile_action(action, params, press, services.profiles)
+    }
+}
 
 /// What the program knows about the world at a press, by dotted name.
 pub type Facts = BTreeMap<String, String>;
@@ -396,6 +497,70 @@ mod tests {
             .to_string(),
             "held on beauty-r1.camera"
         );
+    }
+
+    fn press(event: PressEvent, profile: &str) -> Press<'_> {
+        Press {
+            device: "beauty-r1",
+            button: "camera",
+            event,
+            at: 0.0,
+            profile,
+        }
+    }
+
+    fn name(profile: &str) -> toml::Table {
+        toml::Table::from_iter([("name".to_string(), toml::Value::String(profile.to_string()))])
+    }
+
+    #[test]
+    fn the_profile_actions_reach_the_selection() {
+        let mut s = rules();
+        let none = toml::Table::new();
+        let tap = PressEvent::Start(PressKind::Tap);
+        run_profile_action("set", &name("presentation"), &press(tap, "media"), &mut s).unwrap();
+        assert_eq!(s.active(&Facts::new()).0, "presentation");
+        run_profile_action(
+            "set",
+            &name("media"),
+            &press(PressEvent::Tick { nth: 2 }, "media"),
+            &mut s,
+        )
+        .unwrap();
+        assert_eq!(
+            s.active(&Facts::new()).0,
+            "presentation",
+            "a tick switches nothing"
+        );
+        // The press was looked up in `reading` while `presentation` is
+        // active, so stepping from the press and stepping from the active
+        // profile land on different profiles.
+        run_profile_action("next", &none, &press(tap, "reading"), &mut s).unwrap();
+        assert_eq!(s.active(&Facts::new()).0, "media");
+        run_profile_action("auto", &none, &press(tap, "reading"), &mut s).unwrap();
+        assert_eq!(
+            s.active(&Facts::new()).1,
+            Why::Rule {
+                number: 2,
+                when: vec![]
+            }
+        );
+        run_profile_action(
+            "hold",
+            &name("presentation"),
+            &press(PressEvent::Start(PressKind::Hold), "media"),
+            &mut s,
+        )
+        .unwrap();
+        assert_eq!(s.active(&Facts::new()).0, "presentation");
+        run_profile_action(
+            "hold",
+            &name("presentation"),
+            &press(PressEvent::End, "media"),
+            &mut s,
+        )
+        .unwrap();
+        assert_eq!(s.active(&Facts::new()).0, "media");
     }
 
     #[test]

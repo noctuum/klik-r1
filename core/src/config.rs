@@ -6,6 +6,7 @@ use crate::device::{ButtonSpec, button_spec};
 use crate::error::ConfigError;
 use crate::module::{ActionSpec, ParamKind};
 use crate::press::PressKind;
+use crate::select::Selection;
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawDevice {
@@ -257,13 +258,14 @@ impl Config {
     }
 }
 
-/// The profiles of bindings, checked against the devices and the actions,
-/// with the active one chosen. With no rules yet, the one profile of the
-/// configuration is the active one, and two or more are refused.
+/// The profiles of bindings and the rules between them, checked against the
+/// devices, the actions and the facts the modules publish. Several profiles
+/// need rules to choose between them.
 #[derive(Debug, Clone)]
 pub struct Layout {
     profiles: BTreeMap<String, ProfileSection>,
-    active: String,
+    order: Vec<String>,
+    rules: Vec<Rule>,
 }
 
 impl Layout {
@@ -271,15 +273,26 @@ impl Layout {
         config: &Config,
         buttons: &dyn Fn(&str) -> Option<&'static [ButtonSpec]>,
         actions: &[ActionSpec],
+        facts: &[&str],
     ) -> Result<Self, ConfigError> {
-        let active = match (config.order.first(), &config.rules[..]) {
-            (None, _) => return Err(ConfigError::NoProfiles),
-            (Some(_), []) if config.order.len() > 1 => {
-                return Err(ConfigError::SeveralProfilesNoRules);
+        if config.order.is_empty() {
+            return Err(ConfigError::NoProfiles);
+        }
+        if config.order.len() > 1 && config.rules.is_empty() {
+            return Err(ConfigError::SeveralProfilesNoRules);
+        }
+        for (index, rule) in config.rules.iter().enumerate() {
+            if let Some((fact, _)) = rule
+                .when
+                .iter()
+                .find(|(fact, _)| !facts.contains(&fact.as_str()))
+            {
+                return Err(ConfigError::UnknownFact {
+                    rule: index + 1,
+                    fact: fact.clone(),
+                });
             }
-            (Some(first), []) => first.clone(),
-            (Some(_), [.., default]) => default.profile.clone(),
-        };
+        }
         for profile in config.profiles.values() {
             check_chain(&config.profiles, profile)?;
             for (key, binding) in &profile.bindings {
@@ -307,33 +320,57 @@ impl Layout {
                         action: format!("{}.{}", binding.module, binding.action),
                     });
                 };
-                action
-                    .check(&binding.params)
-                    .map_err(|reason| ConfigError::BadParams {
-                        key: key.to_string(),
-                        reason,
-                    })?;
+                let bad = |reason: String| ConfigError::BadParams {
+                    key: key.to_string(),
+                    reason,
+                };
+                action.check(&binding.params).map_err(bad)?;
+                if action.hold_only && key.kind != PressKind::Hold {
+                    return Err(bad(format!(
+                        "the action {}.{} works on a hold",
+                        action.module, action.name
+                    )));
+                }
+                for param in action
+                    .params
+                    .iter()
+                    .filter(|p| p.kind == ParamKind::Profile)
+                {
+                    if let Some(name) = binding.params.get(param.name).and_then(toml::Value::as_str)
+                        && !config.profiles.contains_key(name)
+                    {
+                        return Err(bad(format!("no profile named {name}")));
+                    }
+                }
             }
         }
         Ok(Self {
             profiles: config.profiles.clone(),
-            active,
+            order: config.order.clone(),
+            rules: config.rules.clone(),
         })
     }
 
-    pub fn active(&self) -> &str {
-        &self.active
+    /// The order and the rules, for the daemon to choose by.
+    pub fn selection(&self) -> Selection {
+        Selection::new(self.order.clone(), self.rules.clone())
     }
 
-    /// The binding of the active profile, or of the first parent that has
-    /// one, or none.
-    pub fn lookup(&self, device: &str, button: &str, kind: PressKind) -> Option<&Binding> {
+    /// The binding of `profile`, or of the first parent that has one, or
+    /// none.
+    pub fn lookup(
+        &self,
+        profile: &str,
+        device: &str,
+        button: &str,
+        kind: PressKind,
+    ) -> Option<&Binding> {
         let key = BindingKey {
             device: device.to_string(),
             button: button.to_string(),
             kind,
         };
-        let mut name = Some(self.active.as_str());
+        let mut name = Some(profile);
         while let Some(current) = name {
             let profile = self.profiles.get(current)?;
             if let Some(binding) = profile.bindings.get(&key) {
@@ -427,6 +464,7 @@ mod tests {
                 kind: ParamKind::Key,
                 required: true,
             }],
+            ..ActionSpec::PLAIN
         },
         ActionSpec {
             module: "input",
@@ -436,8 +474,18 @@ mod tests {
                 kind: ParamKind::OneOf(&["up", "down"]),
                 required: true,
             }],
+            ..ActionSpec::PLAIN
         },
     ];
+
+    /// The two of `input` above and the four of the core's profile actions.
+    fn actions() -> Vec<ActionSpec> {
+        ACTIONS
+            .iter()
+            .chain(crate::select::PROFILE_ACTIONS.iter())
+            .copied()
+            .collect()
+    }
 
     const SAMPLE: &str = r#"
         [devices.beauty-r1]
@@ -453,7 +501,7 @@ mod tests {
     "#;
 
     fn layout(text: &str) -> Result<Layout, ConfigError> {
-        Layout::new(&Config::from_toml(text)?, &buttons, &ACTIONS)
+        Layout::new(&Config::from_toml(text)?, &buttons, &actions(), &[])
     }
 
     #[test]
@@ -631,23 +679,26 @@ mod tests {
     #[test]
     fn the_one_profile_is_active_and_its_bindings_resolve() {
         let layout = layout(SAMPLE).unwrap();
-        assert_eq!(layout.active(), "reading");
-        let binding = layout.lookup("beauty-r1", "up", PressKind::Hold).unwrap();
+        assert_eq!(
+            layout.selection().active(&crate::select::Facts::new()).0,
+            "reading"
+        );
+        let binding = layout
+            .lookup("reading", "beauty-r1", "up", PressKind::Hold)
+            .unwrap();
         assert_eq!(binding.module, "input");
         assert_eq!(binding.action, "wheel");
         assert_eq!(binding.params["direction"].as_str(), Some("up"));
         assert!(
             layout
-                .lookup("beauty-r1", "center", PressKind::Hold)
+                .lookup("reading", "beauty-r1", "center", PressKind::Hold)
                 .is_none()
         );
     }
 
-    /// Two profiles are legal only once rules choose between them, so the
-    /// layout here is built directly, with `reading` active over `base`.
     #[test]
     fn a_lookup_walks_the_parents_and_stops_at_the_first_binding() {
-        let config = Config::from_toml(
+        let layout = layout(
             r#"
             [devices.beauty-r1]
             uniq = "aa"
@@ -658,24 +709,70 @@ mod tests {
             extends = "base"
             [profiles.reading.bindings]
             "beauty-r1.center:tap" = { action = "input.key", key = "KEY_2" }
+            [[rules]]
+            use = "reading"
             "#,
         )
         .unwrap();
-        let layout = Layout {
-            profiles: config.profiles,
-            active: "reading".to_string(),
-        };
         let center = layout
-            .lookup("beauty-r1", "center", PressKind::Tap)
+            .lookup("reading", "beauty-r1", "center", PressKind::Tap)
             .unwrap();
         assert_eq!(
             center.params["key"].as_str(),
             Some("KEY_2"),
-            "the active profile first"
+            "the profile asked for first"
         );
-        let up = layout.lookup("beauty-r1", "up", PressKind::Tap).unwrap();
+        let up = layout
+            .lookup("reading", "beauty-r1", "up", PressKind::Tap)
+            .unwrap();
         assert_eq!(up.action, "wheel", "then its parent");
-        assert!(layout.lookup("beauty-r1", "up", PressKind::Hold).is_none());
+        assert!(
+            layout
+                .lookup("reading", "beauty-r1", "up", PressKind::Hold)
+                .is_none()
+        );
+        assert_eq!(
+            layout
+                .lookup("base", "beauty-r1", "center", PressKind::Tap)
+                .unwrap()
+                .params["key"]
+                .as_str(),
+            Some("KEY_1"),
+            "the parent alone does not see its child"
+        );
+    }
+
+    #[test]
+    fn a_rule_over_a_fact_nobody_publishes_is_refused() {
+        let text = format!(
+            "{DEVICE}[profiles.one]\n[[rules]]\nwhen = {{ window.class = \"x\" }}\nuse = \"one\"\n[[rules]]\nuse = \"one\"\n"
+        );
+        let config = Config::from_toml(&text).unwrap();
+        let error = Layout::new(&config, &buttons, &actions(), &[]).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::UnknownFact { rule: 1, ref fact } if fact == "window.class"),
+            "{error}"
+        );
+        assert!(Layout::new(&config, &buttons, &actions(), &["window.class"]).is_ok());
+    }
+
+    #[test]
+    fn a_profile_parameter_names_a_profile_of_the_configuration() {
+        let text = format!(
+            "{DEVICE}[profiles.one.bindings]\n\"beauty-r1.center:tap\" = {{ action = \"profile.set\", name = \"nope\" }}\n"
+        );
+        let error = layout(&text).unwrap_err().to_string();
+        assert!(error.contains("no profile named nope"), "{error}");
+    }
+
+    /// A hold on a tap would never see the end that releases it.
+    #[test]
+    fn a_hold_only_action_on_a_tap_is_refused() {
+        let text = format!(
+            "{DEVICE}[profiles.one.bindings]\n\"beauty-r1.center:tap\" = {{ action = \"profile.hold\", name = \"one\" }}\n"
+        );
+        let error = layout(&text).unwrap_err().to_string();
+        assert!(error.contains("works on a hold"), "{error}");
     }
 
     /// The error names the rule to write.
@@ -694,7 +791,8 @@ mod tests {
             )
             .unwrap(),
             &buttons,
-            &ACTIONS,
+            &actions(),
+            &[],
         );
         assert!(matches!(layout, Err(ConfigError::SeveralProfilesNoRules)));
         let error = ConfigError::SeveralProfilesNoRules.to_string();

@@ -17,6 +17,7 @@ pub const ACTIONS: [ActionSpec; 3] = [
             kind: ParamKind::Key,
             required: true,
         }],
+        ..ActionSpec::PLAIN
     },
     ActionSpec {
         module: "input",
@@ -33,11 +34,12 @@ pub const ACTIONS: [ActionSpec; 3] = [
                 required: false,
             },
         ],
+        ..ActionSpec::PLAIN
     },
     ActionSpec {
         module: "input",
         name: "click",
-        params: &[],
+        ..ActionSpec::PLAIN
     },
 ];
 
@@ -221,7 +223,8 @@ impl Module for Input {
 mod tests {
     use super::*;
     use klik_core::module::{Journal, Rect};
-    use klik_core::platform::Injector;
+    use klik_core::platform::{Injector, Process, Run};
+    use klik_core::select::Selection;
     use std::io;
 
     /// Records what an action asked the injector for. The one allowed fake:
@@ -274,12 +277,26 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
+    /// A placeholder for the process service, which no action of `input`
+    /// calls: every method panics.
+    struct Unused;
+
+    impl Process for Unused {
+        fn output(&mut self, _: &Run) -> io::Result<std::process::Output> {
+            unreachable!("input runs no program")
+        }
+        fn spawn(&mut self, _: &Run, _: Box<dyn FnOnce(String) + Send>) -> io::Result<()> {
+            unreachable!("input runs no program")
+        }
+    }
+
     fn press(event: PressEvent, at: f64) -> Press<'static> {
         Press {
             device: "beauty-r1",
             button: "up",
             event,
             at,
+            profile: "one",
         }
     }
 
@@ -292,10 +309,13 @@ mod tests {
     ) -> (Vec<String>, Vec<String>) {
         let mut recorder = Recorder::default();
         let mut lines = Lines::default();
+        let mut selection = Selection::new(vec!["one".to_string()], vec![]);
         let mut services = Services {
             input: &mut recorder,
             journal: &mut lines,
             desktop: None,
+            process: &mut Unused,
+            profiles: &mut selection,
         };
         input
             .run(action, &table(params), &press(event, at), &mut services)

@@ -9,7 +9,9 @@ use klik_core::gesture::Gesture;
 use klik_core::module::{Journal, Module, Press, PressEvent, Services};
 use klik_core::platform::{Grab, Pulse};
 use klik_core::press::{PressKind, Recognized};
+use klik_core::select::{Facts, ProfileActions};
 use klik_linux::injector::Uinput;
+use klik_linux::process::Runner;
 use klik_linux::source::Source;
 
 use crate::control::{Shared, serve};
@@ -47,7 +49,8 @@ pub fn assemble(text: &str) -> anyhow::Result<Assembled> {
         profiles.push((kind.build)(&section.settings).with_context(|| format!("device {id}"))?);
         ids.push(id.clone());
     }
-    let mut modules: Vec<Box<dyn Module>> = vec![Box::new(klik_input::Input::new())];
+    let mut modules: Vec<Box<dyn Module>> =
+        vec![Box::new(klik_input::Input::new()), Box::new(ProfileActions)];
     for module in &mut modules {
         module.configure(config.modules.get(module.name()))?;
     }
@@ -65,7 +68,11 @@ pub fn assemble(text: &str) -> anyhow::Result<Assembled> {
             .position(|id| id == device)
             .map(|index| profiles[index].buttons())
     };
-    let layout = Layout::new(&config, &buttons, &actions)?;
+    let facts: Vec<&str> = modules
+        .iter()
+        .flat_map(|module| module.facts().iter().copied())
+        .collect();
+    let layout = Layout::new(&config, &buttons, &actions, &facts)?;
     let keys = layout.key_names(&actions);
     Ok(Assembled {
         config,
@@ -80,6 +87,7 @@ pub fn assemble(text: &str) -> anyhow::Result<Assembled> {
 /// The status the daemon starts with: every configured device, none of them
 /// connected yet. A device the daemon never sees stays as this leaves it.
 pub fn initial_status(assembled: &Assembled) -> Status {
+    let (profile, why) = assembled.layout.selection().active(&Facts::new());
     Status {
         version: env!("CARGO_PKG_VERSION").to_string(),
         devices: assembled
@@ -92,8 +100,8 @@ pub fn initial_status(assembled: &Assembled) -> Status {
                 grab: None,
             })
             .collect(),
-        profile: assembled.layout.active().to_string(),
-        why: "the one profile of the configuration".to_string(),
+        profile,
+        why: why.to_string(),
     }
 }
 
@@ -129,6 +137,8 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         Source::new(profiles.len(), poll_ms, true).context("cannot watch the input devices")?;
     klik_linux::stop::install().context("cannot catch SIGTERM and SIGINT")?;
     let mut journal = Stderr;
+    let mut runner = Runner;
+    let mut selection = layout.selection();
     let mut gestures: Vec<Gesture> = ids.iter().map(|_| Gesture::new()).collect();
     journal.line(&format!("waiting for {}", ids.join(", ")));
 
@@ -224,13 +234,15 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                 Recognized::Press(_, kind) => *kind,
                 _ => gestures[device].kind_of(button).unwrap_or(PressKind::Hold),
             };
-            let binding = layout.lookup(&ids[device], button, kind);
+            let (profile, _) = selection.active(&Facts::new());
+            let binding = layout.lookup(&profile, &ids[device], button, kind);
             if let Some(binding) = binding {
                 let press = Press {
                     device: &ids[device],
                     button,
                     event,
                     at: now,
+                    profile: &profile,
                 };
                 let module = modules
                     .iter_mut()
@@ -240,6 +252,8 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                         input: &mut injector,
                         journal: &mut journal,
                         desktop: None,
+                        process: &mut runner,
+                        profiles: &mut selection,
                     };
                     if let Err(fault) =
                         module.run(&binding.action, &binding.params, &press, &mut services)

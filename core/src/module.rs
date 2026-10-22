@@ -1,3 +1,9 @@
+use std::io;
+
+use crate::error::ConfigError;
+use crate::platform::Injector;
+use crate::press::PressKind;
+
 /// What a parameter of an action is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
@@ -84,6 +90,84 @@ impl ParamKind {
             Self::OneOf(choices) => format!("one of {}", choices.join(", ")),
         }
     }
+}
+
+/// Where a press is inside its gesture, from the module's side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressEvent {
+    /// The press itself. A tap is this and nothing more.
+    Start(PressKind),
+    /// The `nth` report of a held button, counting the press as 1.
+    Tick { nth: u32 },
+    /// The hold ended.
+    End,
+}
+
+/// What an action receives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Press<'a> {
+    pub device: &'a str,
+    pub button: &'a str,
+    pub event: PressEvent,
+    /// The time of the event clock, seconds since the epoch.
+    pub at: f64,
+}
+
+/// A rectangle of the screen in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// A window the desktop knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    pub id: String,
+    pub class: String,
+    pub title: String,
+    pub rect: Rect,
+}
+
+/// What a desktop module gives. None of it exists in this plan; the type
+/// is here so that `input` can ask and be told there is no desktop.
+pub trait Desktop {
+    fn front(&mut self) -> io::Result<Option<Window>>;
+    fn screen(&mut self) -> io::Result<Rect>;
+}
+
+pub trait Journal {
+    fn line(&mut self, text: &str);
+    fn debug(&mut self, text: &str);
+}
+
+/// The services of the core, handed to an action for the time it runs.
+pub struct Services<'a> {
+    pub input: &'a mut dyn Injector,
+    pub journal: &'a mut dyn Journal,
+    pub desktop: Option<&'a mut dyn Desktop>,
+}
+
+/// What an action that failed says. Printed with the label of the press.
+pub type Fault = Box<dyn std::error::Error + Send + Sync>;
+
+pub trait Module: Send {
+    fn name(&self) -> &'static str;
+    fn actions(&self) -> &'static [ActionSpec];
+    /// The `[modules.<name>]` section, or none. An error here stops the
+    /// daemon at startup with the name of the module and the reason.
+    fn configure(&mut self, section: Option<&toml::Table>) -> Result<(), ConfigError>;
+    /// Runs an action this module declared, with parameters `ActionSpec::check`
+    /// accepted.
+    fn run(
+        &mut self,
+        action: &str,
+        params: &toml::Table,
+        press: &Press,
+        services: &mut Services,
+    ) -> Result<(), Fault>;
 }
 
 #[cfg(test)]

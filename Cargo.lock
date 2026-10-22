@@ -115,6 +115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "klik-input"
+version = "0.1.0"
+dependencies = [
+ "klik-core",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "klik-linux"
 version = "0.1.0"
 dependencies = [

@@ -143,6 +143,19 @@ pub trait Journal {
     fn debug(&mut self, text: &str);
 }
 
+/// The four profile actions, as a service an action can call.
+pub trait Profiles {
+    /// Keeps `name` active until the next switch.
+    fn set(&mut self, name: &str);
+    /// Keeps the profile after `current`, in the order of the file, active.
+    fn next_after(&mut self, current: &str);
+    /// Hands the choice back to the rules.
+    fn auto(&mut self);
+    /// Makes `name` active while this button is held.
+    fn hold(&mut self, device: &str, button: &str, name: &str);
+    fn release(&mut self, device: &str, button: &str);
+}
+
 /// The services of the core, handed to an action for the time it runs.
 pub struct Services<'a> {
     pub input: &'a mut dyn Injector,

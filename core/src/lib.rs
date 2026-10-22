@@ -7,3 +7,4 @@ pub mod module;
 pub mod platform;
 pub mod press;
 pub mod raw;
+pub mod select;

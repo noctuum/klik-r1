@@ -126,8 +126,26 @@ fn point(table: &toml::Table, key: &str, default: Signature) -> Result<Signature
     })
 }
 
+/// Every key a `[devices.<name>]` section of this profile may hold.
+const KEYS: [&str; 8] = [
+    "uniq",
+    "debounce_ms",
+    "connect_grace_ms",
+    "camera_hold_ms",
+    "volume_repeat_ms",
+    "tolerance",
+    "center",
+    "camera",
+];
+
 impl Settings {
     pub fn from_table(table: &toml::Table) -> Result<Self, ConfigError> {
+        if let Some(key) = table.keys().find(|key| !KEYS.contains(&key.as_str())) {
+            return Err(ConfigError::UnknownDeviceKey {
+                key: key.clone(),
+                known: KEYS.join(", "),
+            });
+        }
         let uniq = table
             .get("uniq")
             .and_then(toml::Value::as_str)
@@ -339,6 +357,15 @@ mod tests {
         assert_eq!(settings.signatures[1].x, 2000);
         assert_eq!(settings.signatures[1].y, 3400);
         assert_eq!(settings.signatures[1].tolerance, 8);
+    }
+
+    /// A misspelled key would leave the measured default in place and say
+    /// nothing, while every other mistake in the file is refused.
+    #[test]
+    fn an_unknown_key_is_refused_by_name() {
+        let error =
+            Settings::from_table(&table("uniq = \"aa\"\ndebounce_msec = 60\n")).unwrap_err();
+        assert!(error.to_string().contains("debounce_msec"), "{error}");
     }
 
     #[test]

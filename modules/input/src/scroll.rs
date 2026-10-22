@@ -64,7 +64,7 @@ impl Series {
 /// The section `[modules.input]`: the speed of the wheel and where the cursor
 /// is aimed. Every key has a default, so the section may be left out.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScrollSettings {
     pub hi_res_per_event: u32,
     /// Added to the rate after every `events_per_step` events of one gesture.
@@ -391,5 +391,13 @@ mod tests {
     fn an_aim_fraction_of_zero_is_accepted() {
         let settings = checked("aim_x = 0.0").expect("0.0 aims at the window's first pixel");
         assert_eq!(settings.aim_x, 0.0);
+    }
+
+    /// A misspelled key would otherwise leave its default in place and say
+    /// nothing, while every other mistake in the file is refused.
+    #[test]
+    fn an_unknown_key_is_refused_by_name() {
+        let reason = checked("hi_res_per_evnt = 80").unwrap_err();
+        assert!(reason.contains("hi_res_per_evnt"), "{reason}");
     }
 }

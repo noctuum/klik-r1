@@ -29,6 +29,7 @@ struct RawBinding {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DebugConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -428,6 +429,17 @@ mod tests {
             config.devices["right"].profile, "right",
             "no key is the name of the section"
         );
+    }
+
+    /// `enable` for `enabled` would leave the journal quiet exactly when the
+    /// user turned it on to find a problem.
+    #[test]
+    fn an_unknown_key_in_the_debug_section_is_refused_by_name() {
+        let error = Config::from_toml(
+            "[devices.beauty-r1]\nuniq = \"aa\"\n[profiles.one]\n[debug]\nenable = true\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("enable"), "{error}");
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub enum ConfigError {
     MissingDeviceKey(&'static str),
     #[error("the device key {key} is not {expected}")]
     BadDeviceValue { key: String, expected: &'static str },
+    #[error("the device section has a key {key} its profile does not read; it reads {known}")]
+    UnknownDeviceKey { key: String, known: String },
     #[error("no [devices.<id>] section, so there is nothing to read")]
     NoDevices,
     #[error("no [profiles.<name>] section, so no button does anything")]

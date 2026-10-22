@@ -6,16 +6,16 @@ use klik_core::config::{Config, Layout};
 use klik_core::control::{DeviceStatus, Status};
 use klik_core::device::{Profile, ProfileKind};
 use klik_core::gesture::Gesture;
-use klik_core::module::{Journal, Module, Press, PressEvent, Services};
+use klik_core::module::{Desktop, Journal, Module, Press, PressEvent, Services};
 use klik_core::platform::{Grab, Pulse};
 use klik_core::press::{PressKind, Recognized};
-use klik_core::select::{Facts, ProfileActions};
+use klik_core::select::{Facts, Pins, ProfileActions, Selection, Why};
 use klik_linux::injector::Uinput;
 use klik_linux::process::Runner;
 use klik_linux::source::Source;
 
 use crate::control::{Shared, serve};
-use crate::journal::{Stderr, came_to_line, label, set_debug};
+use crate::journal::{Stderr, came_to_line, label, set_debug, switched_line};
 
 /// The profiles this build knows, by the id a device section names.
 pub const KINDS: [ProfileKind; 1] = [klik_beauty_r1::KIND];
@@ -26,6 +26,7 @@ pub struct Assembled {
     pub profiles: Vec<Box<dyn Profile>>,
     pub modules: Vec<Box<dyn Module>>,
     pub layout: Layout,
+    pub selection: Selection,
     pub keys: Vec<String>,
 }
 
@@ -51,6 +52,10 @@ pub fn assemble(text: &str) -> anyhow::Result<Assembled> {
     }
     let mut modules: Vec<Box<dyn Module>> =
         vec![Box::new(klik_input::Input::new()), Box::new(ProfileActions)];
+    #[cfg(feature = "kwin")]
+    modules.push(Box::new(klik_kwin::Kwin));
+    #[cfg(feature = "script")]
+    modules.push(Box::new(klik_script::Script));
     for module in &mut modules {
         module.configure(config.modules.get(module.name()))?;
     }
@@ -74,12 +79,14 @@ pub fn assemble(text: &str) -> anyhow::Result<Assembled> {
         .collect();
     let layout = Layout::new(&config, &buttons, &actions, &facts)?;
     let keys = layout.key_names(&actions);
+    let selection = layout.selection();
     Ok(Assembled {
         config,
         ids,
         profiles,
         modules,
         layout,
+        selection,
         keys,
     })
 }
@@ -87,7 +94,7 @@ pub fn assemble(text: &str) -> anyhow::Result<Assembled> {
 /// The status the daemon starts with: every configured device, none of them
 /// connected yet. A device the daemon never sees stays as this leaves it.
 pub fn initial_status(assembled: &Assembled) -> Status {
-    let (profile, why) = assembled.layout.selection().active(&Facts::new());
+    let (profile, why) = assembled.selection.active(&Facts::new());
     Status {
         version: env!("CARGO_PKG_VERSION").to_string(),
         devices: assembled
@@ -116,9 +123,11 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         mut profiles,
         mut modules,
         layout,
+        mut selection,
         keys,
     } = assembled;
     set_debug(config.debug.enabled);
+    let mut journal = Stderr;
     // The socket comes first: a daemon that already answers on it holds the
     // remote, and a second one is refused before it declares a keyboard.
     let shared = Shared::new(status);
@@ -136,9 +145,21 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let mut source =
         Source::new(profiles.len(), poll_ms, true).context("cannot watch the input devices")?;
     klik_linux::stop::install().context("cannot catch SIGTERM and SIGINT")?;
-    let mut journal = Stderr;
     let mut runner = Runner;
-    let mut selection = layout.selection();
+    #[cfg(feature = "kwin")]
+    let mut desktop: Option<Box<dyn Desktop>> = match klik_kwin::KwinDesktop::new(Box::new(Runner))
+    {
+        Ok(desktop) => Some(Box::new(desktop)),
+        Err(error) => {
+            journal.line(&format!("kwin: off, {error}"));
+            None
+        }
+    };
+    #[cfg(not(feature = "kwin"))]
+    let mut desktop: Option<Box<dyn Desktop>> = None;
+    let mut current = selection.active(&Facts::new());
+    let mut last_facts = Facts::new();
+    let mut pins = Pins::default();
     let mut gestures: Vec<Gesture> = ids.iter().map(|_| Gesture::new()).collect();
     journal.line(&format!("waiting for {}", ids.join(", ")));
 
@@ -181,6 +202,14 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                         status.devices[device].connected = false;
                         status.devices[device].grab = None;
                     });
+                    // A hold on this device will never see its end.
+                    selection.release_device(&ids[device]);
+                    switch_to(
+                        &mut current,
+                        selection.active(&last_facts),
+                        &mut journal,
+                        &shared,
+                    );
                     continue;
                 }
                 Pulse::Event { device, event } => {
@@ -234,7 +263,32 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                 Recognized::Press(_, kind) => *kind,
                 _ => gestures[device].kind_of(button).unwrap_or(PressKind::Hold),
             };
-            let (profile, _) = selection.active(&Facts::new());
+            // The profile of a gesture is chosen at its press, with the facts
+            // asked then, and its ticks and its end keep it.
+            let profile = if matches!(event, PressEvent::Start(_)) {
+                let needed = selection.needs_facts();
+                if !needed.is_empty() {
+                    let mut services = Services {
+                        input: &mut injector,
+                        journal: &mut journal,
+                        desktop: desk(&mut desktop),
+                        process: &mut runner,
+                        profiles: &mut selection,
+                    };
+                    last_facts = gather(&needed, &mut modules, &mut services);
+                }
+                switch_to(
+                    &mut current,
+                    selection.active(&last_facts),
+                    &mut journal,
+                    &shared,
+                );
+                pins.pin(&ids[device], button, &current.0);
+                current.0.clone()
+            } else {
+                pins.of(&ids[device], button)
+                    .map_or_else(|| current.0.clone(), str::to_string)
+            };
             let binding = layout.lookup(&profile, &ids[device], button, kind);
             if let Some(binding) = binding {
                 let press = Press {
@@ -251,7 +305,7 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                     let mut services = Services {
                         input: &mut injector,
                         journal: &mut journal,
-                        desktop: None,
+                        desktop: desk(&mut desktop),
                         process: &mut runner,
                         profiles: &mut selection,
                     };
@@ -266,6 +320,17 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                         ));
                     }
                 }
+                if binding.module == "profile" {
+                    switch_to(
+                        &mut current,
+                        selection.active(&last_facts),
+                        &mut journal,
+                        &shared,
+                    );
+                }
+            }
+            if event == PressEvent::End {
+                pins.unpin(&ids[device], button);
             }
             if matches!(event, PressEvent::Start(_)) {
                 journal_line(
@@ -274,12 +339,66 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                     &format!(
                         "{}: {}",
                         label(now, &ids[device], &recognized),
-                        came_to_line(binding, started.elapsed())
+                        came_to_line(binding, &profile, started.elapsed())
                     ),
                 );
             }
         }
     }
+}
+
+/// The desktop for one action. The trait object is narrowed to the borrow
+/// here, since inside an `Option` the coercion would not happen and the
+/// services would borrow everything for the life of the box.
+fn desk(desktop: &mut Option<Box<dyn Desktop>>) -> Option<&mut dyn Desktop> {
+    match desktop {
+        Some(desktop) => Some(desktop.as_mut()),
+        None => None,
+    }
+}
+
+/// The facts among `needed`, each asked of the module that publishes it, all
+/// of one module's in one question. A module that fails says so in the
+/// journal, and its facts stay absent, so the rules fall through to the
+/// default.
+fn gather(needed: &[String], modules: &mut [Box<dyn Module>], services: &mut Services) -> Facts {
+    let mut facts = Facts::new();
+    for module in modules.iter_mut() {
+        let wanted: Vec<String> = needed
+            .iter()
+            .filter(|fact| module.facts().contains(&fact.as_str()))
+            .cloned()
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        match module.ask(&wanted, services) {
+            Ok(pairs) => facts.extend(pairs),
+            Err(fault) => services
+                .journal
+                .line(&format!("facts from {}: {fault}", module.name())),
+        }
+    }
+    facts
+}
+
+/// Makes `now` the active profile, and says so in the journal and in the
+/// status when the profile or the reason changed.
+fn switch_to(
+    current: &mut (String, Why),
+    now: (String, Why),
+    journal: &mut Stderr,
+    shared: &Shared,
+) {
+    if *current == now {
+        return;
+    }
+    journal.line(&switched_line(&now.0, &now.1));
+    shared.update(|status| {
+        status.profile = now.0.clone();
+        status.why = now.1.to_string();
+    });
+    *current = now;
 }
 
 /// A line about one press: in the journal in the debug mode, and to every
@@ -345,12 +464,38 @@ mod tests {
             [devices.beauty-r1]
             uniq = "aa"
             [profiles.one]
-            [modules.kwin]
+            [modules.lua]
             "#,
         )
         .err()
         .expect("refused");
-        assert!(error.to_string().contains("[modules.kwin]"), "{error}");
+        assert!(error.to_string().contains("[modules.lua]"), "{error}");
+    }
+
+    const RULES: &str = r#"
+        [devices.beauty-r1]
+        uniq = "aa"
+        [profiles.reading]
+        [profiles.media]
+        [[rules]]
+        when = { window.class = "codium" }
+        use = "reading"
+        [[rules]]
+        use = "media"
+    "#;
+
+    #[cfg(feature = "kwin")]
+    #[test]
+    fn rules_over_the_window_are_accepted_with_kwin() {
+        let assembled = assemble(RULES).unwrap();
+        assert_eq!(assembled.selection.needs_facts(), ["window.class"]);
+    }
+
+    #[cfg(not(feature = "kwin"))]
+    #[test]
+    fn without_kwin_a_rule_over_the_window_is_refused() {
+        let error = format!("{:#}", assemble(RULES).err().expect("refused"));
+        assert!(error.contains("window.class"), "{error}");
     }
 
     /// The example in `packaging` is what a new user copies, so it is held to

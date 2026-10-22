@@ -10,11 +10,18 @@ repository.workspace = true
 name = "klik"
 path = "src/main.rs"
 
+[features]
+default = ["kwin", "script"]
+kwin = ["dep:klik-kwin"]
+script = ["dep:klik-script"]
+
 [dependencies]
 klik-core = { path = "../core" }
 klik-linux = { path = "../platform/linux" }
 klik-beauty-r1 = { path = "../devices/beauty-r1" }
 klik-input = { path = "../modules/input" }
+klik-kwin = { path = "../modules/kwin", optional = true }
+klik-script = { path = "../modules/script", optional = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

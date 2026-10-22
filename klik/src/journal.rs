@@ -4,6 +4,7 @@ use std::time::Duration;
 use klik_core::config::Binding;
 use klik_core::module::Journal;
 use klik_core::press::Recognized;
+use klik_core::select::Why;
 
 /// Whether the journal carries what every press came to: `[debug] enabled` of
 /// the configuration, set once when the daemon starts.
@@ -64,13 +65,19 @@ pub fn label(now: f64, device: &str, recognized: &Recognized) -> String {
 }
 
 /// What the journal says about a press once it is done: the action it came
-/// to, and how long the daemon took.
-pub fn came_to_line(binding: Option<&Binding>, took: Duration) -> String {
+/// to, the profile it was looked up in, and how long the daemon took.
+pub fn came_to_line(binding: Option<&Binding>, profile: &str, took: Duration) -> String {
     let what = binding.map_or_else(
         || "nothing".to_string(),
         |binding| format!("{}.{}", binding.module, binding.action),
     );
-    format!("came to {what}, {} ms", took.as_millis())
+    format!("came to {what} in {profile}, {} ms", took.as_millis())
+}
+
+/// What the journal says when another profile becomes the active one, or
+/// the same one for another reason.
+pub fn switched_line(profile: &str, why: &Why) -> String {
+    format!("profile {profile}, {why}")
 }
 
 #[cfg(test)]
@@ -131,16 +138,33 @@ mod tests {
     }
 
     #[test]
-    fn a_press_is_named_by_what_it_came_to() {
+    fn a_press_line_names_the_profile_it_was_looked_up_in() {
         let binding = Binding {
             module: "input".to_string(),
             action: "wheel".to_string(),
             params: toml::Table::new(),
         };
         assert_eq!(
-            came_to_line(Some(&binding), Duration::from_millis(3)),
-            "came to input.wheel, 3 ms"
+            came_to_line(Some(&binding), "reading", Duration::from_millis(3)),
+            "came to input.wheel in reading, 3 ms"
         );
-        assert_eq!(came_to_line(None, Duration::ZERO), "came to nothing, 0 ms");
+        assert_eq!(
+            came_to_line(None, "media", Duration::ZERO),
+            "came to nothing in media, 0 ms"
+        );
+    }
+
+    #[test]
+    fn a_switch_names_the_profile_and_why() {
+        assert_eq!(
+            switched_line(
+                "media",
+                &Why::Rule {
+                    number: 2,
+                    when: vec![]
+                }
+            ),
+            "profile media, rule 2, the default"
+        );
     }
 }

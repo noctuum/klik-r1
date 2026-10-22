@@ -1,0 +1,19 @@
+[package]
+name = "klik-linux"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "klik_linux"
+
+[dependencies]
+klik-core = { path = "../../core" }
+evdev = { workspace = true }
+nix = { workspace = true }
+udev = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

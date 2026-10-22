@@ -16,6 +16,7 @@ struct RawDevice {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawProfile {
     extends: Option<String>,
     #[serde(default)]
@@ -572,6 +573,18 @@ mod tests {
     }
 
     const DEVICE: &str = "[devices.beauty-r1]\nuniq = \"aa\"\n";
+
+    /// `bindigs` for `bindings` would leave the profile with no binding, and
+    /// `extend` for `extends` would leave it without its parent, both in
+    /// silence.
+    #[test]
+    fn an_unknown_key_of_a_profile_is_refused_by_name() {
+        for (key, line) in [("bindigs", "bindigs = {}"), ("extend", "extend = \"one\"")] {
+            let text = format!("{DEVICE}[profiles.one]\n{line}\n");
+            let error = Config::from_toml(&text).unwrap_err();
+            assert!(error.to_string().contains(key), "{error}");
+        }
+    }
 
     /// `profile.next` steps through the profiles in the order the user wrote
     /// them, which a sorted map loses.

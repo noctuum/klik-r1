@@ -1,3 +1,4 @@
+use std::process::Output;
 use std::time::Duration;
 
 use klik_core::error::ConfigError;
@@ -68,6 +69,20 @@ pub fn command_of(params: &toml::Table, press: &Press) -> Run {
     }
 }
 
+/// What a command that was waited for printed, a line each, its output
+/// before its errors.
+pub fn printed_lines(out: &Output) -> Vec<String> {
+    [&out.stdout, &out.stderr]
+        .into_iter()
+        .flat_map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Commands bound to buttons.
 #[derive(Debug, Default)]
 pub struct Script;
@@ -93,7 +108,8 @@ impl Module for Script {
 
     /// The command runs at the press. Detached, its end is watched on
     /// another thread, which writes a failure to standard error, the journal
-    /// of the daemon.
+    /// of the daemon. Waited for, what it printed goes to the journal a line
+    /// each.
     fn run(
         &mut self,
         _action: &str,
@@ -108,13 +124,11 @@ impl Module for Script {
         let command = run.args.last().cloned().unwrap_or_default();
         if params.get("wait").and_then(toml::Value::as_bool) == Some(true) {
             let out = services.process.output(&run)?;
+            for line in printed_lines(&out) {
+                services.journal.line(&format!("script {command}: {line}"));
+            }
             if !out.status.success() {
-                return Err(format!(
-                    "the command exited with {}: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )
-                .into());
+                return Err(format!("the command exited with {}", out.status).into());
             }
             return Ok(());
         }
@@ -129,6 +143,8 @@ impl Module for Script {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
 
     fn table(text: &str) -> toml::Table {
         toml::from_str(text).unwrap()
@@ -173,6 +189,18 @@ mod tests {
             &press(PressKind::Tap),
         );
         assert_eq!(run.limit, Duration::from_millis(250));
+    }
+
+    /// A command that was waited for reaches the journal as a detached one
+    /// does by itself: what it printed, then its errors.
+    #[test]
+    fn a_waited_command_is_journaled_a_line_each() {
+        let out = Output {
+            status: ExitStatus::from_raw(0),
+            stdout: b"one\ntwo\n".to_vec(),
+            stderr: b"oops\n".to_vec(),
+        };
+        assert_eq!(printed_lines(&out), ["one", "two", "oops"]);
     }
 
     #[test]

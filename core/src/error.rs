@@ -23,9 +23,19 @@ pub enum ConfigError {
     #[error("no [profiles.<name>] section, so no button does anything")]
     NoProfiles,
     #[error(
-        "several profiles and no [[rules]] to choose between them; rules come with the next release, so keep one profile for now"
+        "several profiles and no [[rules]] to choose between them; add rules and end them with one that has only use"
     )]
     SeveralProfilesNoRules,
+    #[error("rule {rule} uses {profile}, which is no profile of the configuration")]
+    RuleUnknownProfile { rule: usize, profile: String },
+    #[error(
+        "the last [[rules]] has a condition, so nothing is active when no rule matches; end the rules with one that has only use"
+    )]
+    NoDefaultRule,
+    #[error("rule {0} has no condition, so the rules after it never apply")]
+    RuleAfterDefault(usize),
+    #[error("rule {rule}: the condition on {fact} is not text")]
+    BadCondition { rule: usize, fact: String },
     #[error("malformed binding key {0}, which has to be device.button:kind")]
     BadBindingKey(String),
     #[error("binding {key}: the action {action} has to be module.action")]

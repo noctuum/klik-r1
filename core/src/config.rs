@@ -37,15 +37,59 @@ pub struct DebugConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawRule {
+    #[serde(default)]
+    when: toml::Table,
+    #[serde(rename = "use")]
+    profile: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
     devices: BTreeMap<String, RawDevice>,
     #[serde(default)]
     profiles: BTreeMap<String, RawProfile>,
     #[serde(default)]
+    rules: Vec<RawRule>,
+    #[serde(default)]
     modules: BTreeMap<String, toml::Table>,
     #[serde(default)]
     debug: DebugConfig,
+}
+
+/// One `[[rules]]`: the profile to use when every condition holds. A rule
+/// with no condition is the default, and only the last rule may be one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    /// `(fact, pattern)`, the fact dotted as `window.class`, in the order of
+    /// the file.
+    pub when: Vec<(String, String)>,
+    pub profile: String,
+}
+
+/// The conditions of rule `rule`, with the nested tables TOML makes of
+/// `window.class = ".."` flattened into dotted names.
+fn conditions(
+    rule: usize,
+    prefix: &str,
+    table: &toml::Table,
+) -> Result<Vec<(String, String)>, ConfigError> {
+    let mut pairs = Vec::new();
+    for (key, value) in table {
+        let fact = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            toml::Value::String(pattern) => pairs.push((fact, pattern.clone())),
+            toml::Value::Table(inner) => pairs.extend(conditions(rule, &fact, inner)?),
+            _ => return Err(ConfigError::BadCondition { rule, fact }),
+        }
+    }
+    Ok(pairs)
 }
 
 /// One `[devices.<id>]` section. `profile` names the `ProfileKind` that
@@ -105,6 +149,9 @@ pub struct ProfileSection {
 pub struct Config {
     pub devices: BTreeMap<String, DeviceSection>,
     pub profiles: BTreeMap<String, ProfileSection>,
+    /// The names of the profiles in the order of the file.
+    pub order: Vec<String>,
+    pub rules: Vec<Rule>,
     pub modules: BTreeMap<String, toml::Table>,
     pub debug: DebugConfig,
 }
@@ -169,9 +216,41 @@ impl Config {
                 });
             }
         }
+        // `preserve_order` keeps the keys of a parsed table in the order of
+        // the file, which the map the profiles were read into does not.
+        let order = text
+            .parse::<toml::Table>()?
+            .get("profiles")
+            .and_then(toml::Value::as_table)
+            .map(|table| table.keys().cloned().collect())
+            .unwrap_or_default();
+        let count = raw.rules.len();
+        let mut rules = Vec::with_capacity(count);
+        for (index, rule) in raw.rules.into_iter().enumerate() {
+            let number = index + 1;
+            let when = conditions(number, "", &rule.when)?;
+            if !profiles.contains_key(&rule.profile) {
+                return Err(ConfigError::RuleUnknownProfile {
+                    rule: number,
+                    profile: rule.profile,
+                });
+            }
+            if when.is_empty() && number < count {
+                return Err(ConfigError::RuleAfterDefault(number));
+            }
+            rules.push(Rule {
+                when,
+                profile: rule.profile,
+            });
+        }
+        if rules.last().is_some_and(|rule| !rule.when.is_empty()) {
+            return Err(ConfigError::NoDefaultRule);
+        }
         Ok(Self {
             devices,
             profiles,
+            order,
+            rules,
             modules: raw.modules,
             debug: raw.debug,
         })
@@ -193,11 +272,13 @@ impl Layout {
         buttons: &dyn Fn(&str) -> Option<&'static [ButtonSpec]>,
         actions: &[ActionSpec],
     ) -> Result<Self, ConfigError> {
-        let mut names = config.profiles.keys();
-        let active = match (names.next(), names.next()) {
-            (Some(one), None) => one.clone(),
+        let active = match (config.order.first(), &config.rules[..]) {
             (None, _) => return Err(ConfigError::NoProfiles),
-            (Some(_), Some(_)) => return Err(ConfigError::SeveralProfilesNoRules),
+            (Some(_), []) if config.order.len() > 1 => {
+                return Err(ConfigError::SeveralProfilesNoRules);
+            }
+            (Some(first), []) => first.clone(),
+            (Some(_), [.., default]) => default.profile.clone(),
         };
         for profile in config.profiles.values() {
             check_chain(&config.profiles, profile)?;
@@ -442,6 +523,89 @@ mod tests {
         assert!(error.to_string().contains("enable"), "{error}");
     }
 
+    const DEVICE: &str = "[devices.beauty-r1]\nuniq = \"aa\"\n";
+
+    /// `profile.next` steps through the profiles in the order the user wrote
+    /// them, which a sorted map loses.
+    #[test]
+    fn the_profiles_keep_the_order_of_the_file() {
+        let text =
+            format!("{DEVICE}[profiles.zeta]\n[profiles.alpha]\n[[rules]]\nuse = \"zeta\"\n");
+        assert_eq!(Config::from_toml(&text).unwrap().order, ["zeta", "alpha"]);
+    }
+
+    /// `window.class` in an inline table is a nested table to TOML, and a
+    /// fact is named by its dotted path.
+    #[test]
+    fn a_rule_reads_its_condition_as_dotted_facts() {
+        let text = format!(
+            "{DEVICE}[profiles.reading]\n[profiles.media]\n\
+             [[rules]]\nwhen = {{ window.class = \"codium\", window.title = \"*klik*\" }}\nuse = \"reading\"\n\
+             [[rules]]\nuse = \"media\"\n"
+        );
+        let rules = Config::from_toml(&text).unwrap().rules;
+        assert_eq!(
+            rules[0].when,
+            [
+                ("window.class".to_string(), "codium".to_string()),
+                ("window.title".to_string(), "*klik*".to_string())
+            ]
+        );
+        assert_eq!(rules[0].profile, "reading");
+        assert_eq!(
+            rules[1],
+            Rule {
+                when: vec![],
+                profile: "media".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_rule_that_uses_an_unknown_profile_is_refused_by_number() {
+        let text = format!("{DEVICE}[profiles.one]\n[[rules]]\nuse = \"nope\"\n");
+        let error = Config::from_toml(&text).unwrap_err().to_string();
+        assert!(
+            error.contains("rule 1") && error.contains("nope"),
+            "{error}"
+        );
+    }
+
+    /// Without a rule that matches everything, a press in a window no rule
+    /// names would have no profile at all.
+    #[test]
+    fn rules_that_end_with_a_condition_are_refused() {
+        let text = format!(
+            "{DEVICE}[profiles.one]\n[[rules]]\nwhen = {{ window.class = \"x\" }}\nuse = \"one\"\n"
+        );
+        assert!(matches!(
+            Config::from_toml(&text),
+            Err(ConfigError::NoDefaultRule)
+        ));
+    }
+
+    #[test]
+    fn a_rule_without_a_condition_before_the_last_is_refused() {
+        let text =
+            format!("{DEVICE}[profiles.one]\n[[rules]]\nuse = \"one\"\n[[rules]]\nuse = \"one\"\n");
+        assert!(matches!(
+            Config::from_toml(&text),
+            Err(ConfigError::RuleAfterDefault(1))
+        ));
+    }
+
+    #[test]
+    fn a_condition_that_is_not_text_is_refused() {
+        let text = format!(
+            "{DEVICE}[profiles.one]\n[[rules]]\nwhen = {{ window.class = 3 }}\nuse = \"one\"\n[[rules]]\nuse = \"one\"\n"
+        );
+        let error = Config::from_toml(&text).unwrap_err().to_string();
+        assert!(
+            error.contains("rule 1") && error.contains("window.class"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_configuration_without_a_device_is_refused() {
         assert!(matches!(
@@ -533,6 +697,8 @@ mod tests {
             &ACTIONS,
         );
         assert!(matches!(layout, Err(ConfigError::SeveralProfilesNoRules)));
+        let error = ConfigError::SeveralProfilesNoRules.to_string();
+        assert!(!error.contains("next release"), "{error}");
     }
 
     #[test]

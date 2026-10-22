@@ -29,12 +29,23 @@ fn command(run: &Run) -> Command {
     command
 }
 
+/// Starts the program and names it when it cannot start: the bare error says
+/// `No such file or directory` and not of what.
+fn started(run: &Run, command: &mut Command) -> io::Result<Child> {
+    command.spawn().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{} could not be started: {error}", run.program),
+        )
+    })
+}
+
 impl Process for Runner {
     fn output(&mut self, run: &Run) -> io::Result<Output> {
-        let mut child = command(run)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut child = started(
+            run,
+            command(run).stdout(Stdio::piped()).stderr(Stdio::piped()),
+        )?;
         let deadline = Instant::now() + run.limit;
         let stdout = drained(child.stdout.take());
         let stderr = drained(child.stderr.take());
@@ -61,7 +72,7 @@ impl Process for Runner {
     /// The output of the program goes where the daemon's goes, which for the
     /// service is the journal.
     fn spawn(&mut self, run: &Run, report: Box<dyn FnOnce(String) + Send>) -> io::Result<()> {
-        let mut child = command(run).spawn()?;
+        let mut child = started(run, &mut command(run))?;
         let program = run.program.clone();
         let limit = run.limit;
         let deadline = Instant::now() + limit;
@@ -199,6 +210,35 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("100 ms"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// Without the name the journal says `No such file or directory` and
+    /// not of what.
+    #[test]
+    fn output_names_a_program_that_cannot_start() {
+        let error = Runner
+            .output(&run("klik-test-no-such-program", &[], 2000))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("klik-test-no-such-program"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn spawn_names_a_program_that_cannot_start() {
+        let error = Runner
+            .spawn(
+                &run("klik-test-no-such-program", &[], 2000),
+                Box::new(|_| {}),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("klik-test-no-such-program"),
+            "{error}"
+        );
     }
 
     fn reported(r: Run) -> Result<String, mpsc::RecvTimeoutError> {

@@ -1,12 +1,13 @@
 use std::path::Path;
+use std::sync::mpsc::channel;
 use std::time::Instant;
 
 use anyhow::Context as _;
 use klik_core::config::{Config, Layout};
-use klik_core::control::{DeviceStatus, Status};
+use klik_core::control::{DeviceStatus, ProfileChange, Reply, Status};
 use klik_core::device::{Profile, ProfileKind};
 use klik_core::gesture::Gesture;
-use klik_core::module::{Desktop, Journal, Module, Press, PressEvent, Services};
+use klik_core::module::{Desktop, Journal, Module, Press, PressEvent, Profiles, Services};
 use klik_core::platform::{Grab, Pulse};
 use klik_core::press::{PressKind, Recognized};
 use klik_core::select::{Facts, Pins, ProfileActions, Selection, Why};
@@ -14,7 +15,7 @@ use klik_linux::injector::Uinput;
 use klik_linux::process::Runner;
 use klik_linux::source::Source;
 
-use crate::control::{Shared, serve};
+use crate::control::{Command, Shared, serve};
 use crate::journal::{Stderr, came_to_line, label, set_debug, switched_line};
 
 /// The profiles this build knows, by the id a device section names.
@@ -130,7 +131,13 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let mut journal = Stderr;
     // The socket comes first: a daemon that already answers on it holds the
     // remote, and a second one is refused before it declares a keyboard.
-    let shared = Shared::new(status);
+    let (commands, orders) = channel();
+    let listed = config
+        .order
+        .iter()
+        .map(|name| (name.clone(), config.profiles[name].extends.clone()))
+        .collect();
+    let shared = Shared::new(status, listed, commands);
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .context("XDG_RUNTIME_DIR is not set, so there is no place for the control socket")?;
     let socket = klik_core::control::socket_path(Path::new(&runtime));
@@ -342,6 +349,57 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                         came_to_line(binding, &profile, started.elapsed())
                     ),
                 );
+            }
+        }
+        // What the control socket handed over since the last batch.
+        while let Ok(command) = orders.try_recv() {
+            match command {
+                Command::Profile(change, answer) => {
+                    let reply = match change {
+                        ProfileChange::Set { name } if !selection.knows(&name) => Reply::Error {
+                            message: format!("no profile named {name}"),
+                        },
+                        change => {
+                            match change {
+                                ProfileChange::Set { name } => selection.set(&name),
+                                ProfileChange::Next => {
+                                    let from = current.0.clone();
+                                    selection.next_after(&from);
+                                }
+                                ProfileChange::Auto => selection.auto(),
+                            }
+                            switch_to(
+                                &mut current,
+                                selection.active(&last_facts),
+                                &mut journal,
+                                &shared,
+                            );
+                            Reply::Status(
+                                shared
+                                    .status
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .clone(),
+                            )
+                        }
+                    };
+                    let _ = answer.send(reply);
+                }
+                Command::Facts(answer) => {
+                    let every: Vec<String> = modules
+                        .iter()
+                        .flat_map(|module| module.facts().iter().map(|fact| fact.to_string()))
+                        .collect();
+                    let mut services = Services {
+                        input: &mut injector,
+                        journal: &mut journal,
+                        desktop: desk(&mut desktop),
+                        process: &mut runner,
+                        profiles: &mut selection,
+                    };
+                    let facts = gather(&every, &mut modules, &mut services);
+                    let _ = answer.send(Reply::Facts { facts });
+                }
             }
         }
     }

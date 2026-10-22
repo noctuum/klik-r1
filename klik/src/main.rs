@@ -2,12 +2,14 @@ mod control;
 mod daemon;
 mod journal;
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use klik_core::control::{Reply, Request, Status};
+use klik_core::control::{ProfileChange, ProfileEntry, Reply, Request, Status};
 use klik_core::device::Profile;
 use klik_core::platform::{Grab, Pulse};
 use klik_core::press::Recognized;
@@ -47,6 +49,19 @@ enum Command {
     Status,
     /// Print every press the running daemon handles, until stopped.
     Events,
+    /// Switch the profile of the running daemon by hand, or hand it back to the rules.
+    Profile {
+        #[command(subcommand)]
+        change: ProfileArg,
+    },
+    /// List the profiles, the active one marked, and why it is active.
+    Profiles,
+    /// Print what the modules tell of the world now, the facts the rules read.
+    Facts {
+        /// Seconds to wait first, to bring a window to the front.
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
+    },
     /// Print the udev rule for the devices of the configuration and how to install it.
     InstallUdev {
         #[arg(long)]
@@ -54,8 +69,30 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ProfileArg {
+    /// Keep this profile active until the next switch.
+    Set { name: String },
+    /// Keep the next profile of the configuration active.
+    Next,
+    /// Let the rules choose again.
+    Auto,
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
+        Command::Profile { change } => ask(&Request::Profile {
+            change: match change {
+                ProfileArg::Set { name } => ProfileChange::Set { name },
+                ProfileArg::Next => ProfileChange::Next,
+                ProfileArg::Auto => ProfileChange::Auto,
+            },
+        }),
+        Command::Profiles => ask(&Request::Profiles),
+        Command::Facts { wait } => {
+            std::thread::sleep(Duration::from_secs(wait));
+            ask(&Request::Facts)
+        }
         Command::Daemon { config } => daemon::run(&config.unwrap_or_else(default_config_path)),
         Command::Replay { file } => replay(&file),
         Command::Record {
@@ -270,6 +307,34 @@ pub fn status_lines(status: &Status) -> Vec<String> {
     lines
 }
 
+/// What `klik profiles` prints: the profiles in the order of the file, the
+/// active one marked with `*`, then why it is active.
+pub fn profiles_lines(profiles: &[ProfileEntry], why: &str) -> Vec<String> {
+    let mut lines: Vec<String> = profiles
+        .iter()
+        .map(|profile| {
+            let mark = if profile.active { '*' } else { ' ' };
+            match &profile.extends {
+                Some(parent) => format!("{mark} {} (extends {parent})", profile.name),
+                None => format!("{mark} {}", profile.name),
+            }
+        })
+        .collect();
+    lines.push(format!("why: {why}"));
+    lines
+}
+
+/// What `klik facts` prints: one fact a line.
+pub fn facts_lines(facts: &BTreeMap<String, String>) -> Vec<String> {
+    if facts.is_empty() {
+        return vec!["no facts".to_string()];
+    }
+    facts
+        .iter()
+        .map(|(fact, value)| format!("{fact} = {value}"))
+        .collect()
+}
+
 fn ask(request: &Request) -> anyhow::Result<()> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
     let socket = klik_core::control::socket_path(Path::new(&runtime));
@@ -286,6 +351,18 @@ fn ask(request: &Request) -> anyhow::Result<()> {
         }
         Reply::Error { message } => {
             eprintln!("the daemon refused the request: {message}");
+            false
+        }
+        Reply::Profiles { profiles, why } => {
+            for line in profiles_lines(&profiles, &why) {
+                println!("{line}");
+            }
+            false
+        }
+        Reply::Facts { facts } => {
+            for line in facts_lines(&facts) {
+                println!("{line}");
+            }
             false
         }
     })
@@ -460,5 +537,32 @@ mod tests {
                 "  second (beauty-r1): not connected",
             ]
         );
+    }
+
+    #[test]
+    fn the_profiles_mark_the_active_one_and_say_why() {
+        let profiles = [
+            ProfileEntry {
+                name: "reading".to_string(),
+                extends: None,
+                active: true,
+            },
+            ProfileEntry {
+                name: "media".to_string(),
+                extends: Some("base".to_string()),
+                active: false,
+            },
+        ];
+        assert_eq!(
+            profiles_lines(&profiles, "set by hand"),
+            ["* reading", "  media (extends base)", "why: set by hand"]
+        );
+    }
+
+    #[test]
+    fn the_facts_are_one_per_line_or_none() {
+        let facts = BTreeMap::from([("window.class".to_string(), "codium".to_string())]);
+        assert_eq!(facts_lines(&facts), ["window.class = codium"]);
+        assert_eq!(facts_lines(&BTreeMap::new()), ["no facts"]);
     }
 }

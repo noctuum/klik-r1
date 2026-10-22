@@ -4,23 +4,53 @@ use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use klik_core::control::{Reply, Request, Status};
+use klik_core::control::{ProfileChange, ProfileEntry, Reply, Request, Status};
 
-/// What the loop shares with the clients: the status it keeps current, and
-/// one sender per client that subscribed to the events.
+/// How long a client waits for the loop to answer a request only the loop
+/// can answer.
+pub const ANSWER_LIMIT: Duration = Duration::from_secs(2);
+
+/// A request for the loop, with the way back to the client.
+pub enum Command {
+    Profile(ProfileChange, Sender<Reply>),
+    Facts(Sender<Reply>),
+}
+
+/// What the loop shares with the clients: the status it keeps current, one
+/// sender per client that subscribed to the events, the way to hand the loop
+/// a command, and the profiles of the configuration in the order of the file
+/// with the one each extends.
 #[derive(Clone)]
 pub struct Shared {
     pub status: Arc<Mutex<Status>>,
     pub subscribers: Arc<Mutex<Vec<Sender<String>>>>,
+    pub commands: Sender<Command>,
+    pub profiles: Arc<Vec<(String, Option<String>)>>,
+    pub answer_limit: Duration,
 }
 
 impl Shared {
-    pub fn new(status: Status) -> Self {
+    pub fn new(
+        status: Status,
+        profiles: Vec<(String, Option<String>)>,
+        commands: Sender<Command>,
+    ) -> Self {
         Self {
             status: Arc::new(Mutex::new(status)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
+            commands,
+            profiles: Arc::new(profiles),
+            answer_limit: ANSWER_LIMIT,
         }
+    }
+
+    fn status_now(&self) -> Status {
+        self.status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// One line to every subscriber. A subscriber whose client went away is
@@ -81,14 +111,26 @@ fn serve_one(stream: UnixStream, shared: &Shared) {
         return;
     }
     let reply = match serde_json::from_str::<Request>(line.trim()) {
-        Ok(Request::Status) => {
-            let status = shared
-                .status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            Reply::Status(status)
+        Ok(Request::Status) => Reply::Status(shared.status_now()),
+        Ok(Request::Profiles) => {
+            let status = shared.status_now();
+            Reply::Profiles {
+                profiles: shared
+                    .profiles
+                    .iter()
+                    .map(|(name, extends)| ProfileEntry {
+                        name: name.clone(),
+                        extends: extends.clone(),
+                        active: *name == status.profile,
+                    })
+                    .collect(),
+                why: status.why,
+            }
         }
+        Ok(Request::Profile { change }) => {
+            to_loop(shared, |answer| Command::Profile(change, answer))
+        }
+        Ok(Request::Facts) => to_loop(shared, Command::Facts),
         Ok(Request::Events) => {
             let (sender, receiver) = channel();
             shared
@@ -104,6 +146,26 @@ fn serve_one(stream: UnixStream, shared: &Shared) {
         },
     };
     let _ = write_reply(&mut writer, &reply);
+}
+
+/// Hands the loop a command and waits for its answer, for the answer limit
+/// at most: the loop may be inside a helper program, and a client is not
+/// held for longer than one is allowed to take.
+fn to_loop(shared: &Shared, command: impl FnOnce(Sender<Reply>) -> Command) -> Reply {
+    let (answer, reply) = channel();
+    if shared.commands.send(command(answer)).is_err() {
+        return Reply::Error {
+            message: "the daemon is stopping".to_string(),
+        };
+    }
+    reply
+        .recv_timeout(shared.answer_limit)
+        .unwrap_or_else(|_| Reply::Error {
+            message: format!(
+                "the daemon did not answer within {} ms",
+                shared.answer_limit.as_millis()
+            ),
+        })
 }
 
 fn stream_events(writer: &mut UnixStream, receiver: Receiver<String>) {
@@ -160,11 +222,103 @@ mod tests {
         }
     }
 
+    /// What the loop would share, and the receiving end of its commands.
+    fn sharing() -> (Shared, Receiver<Command>) {
+        let (commands, receiver) = channel();
+        let profiles = vec![
+            ("reading".to_string(), None),
+            ("media".to_string(), Some("base".to_string())),
+        ];
+        (Shared::new(status(), profiles, commands), receiver)
+    }
+
+    fn asked(path: &Path, request: &Request) -> Option<Reply> {
+        let mut got = None;
+        ask(path, request, |reply| {
+            got = Some(reply);
+            false
+        })
+        .unwrap();
+        got
+    }
+
+    #[test]
+    fn a_profile_change_reaches_the_loop_and_its_answer_comes_back() {
+        let dir = std::env::temp_dir().join(format!("klik-control-change-{}", std::process::id()));
+        let path = klik_core::control::socket_path(&dir);
+        let (shared, commands) = sharing();
+        serve(&path, shared).unwrap();
+        let the_loop = thread::spawn(move || {
+            match commands
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the command reached the loop")
+            {
+                Command::Profile(ProfileChange::Next, answer) => {
+                    answer.send(Reply::Status(status())).unwrap()
+                }
+                _ => panic!("another command reached the loop"),
+            }
+        });
+        let got = asked(
+            &path,
+            &Request::Profile {
+                change: ProfileChange::Next,
+            },
+        );
+        the_loop.join().unwrap();
+        assert_eq!(got, Some(Reply::Status(status())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A loop stuck on a helper must not hold the client forever.
+    #[test]
+    fn a_loop_that_does_not_answer_is_reported() {
+        let dir = std::env::temp_dir().join(format!("klik-control-mute-{}", std::process::id()));
+        let path = klik_core::control::socket_path(&dir);
+        let (mut shared, _held) = sharing();
+        shared.answer_limit = Duration::from_millis(50);
+        serve(&path, shared).unwrap();
+        match asked(&path, &Request::Facts) {
+            Some(Reply::Error { message }) => {
+                assert!(message.contains("did not answer within 50 ms"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_profiles_are_answered_from_what_the_loop_shares() {
+        let dir =
+            std::env::temp_dir().join(format!("klik-control-profiles-{}", std::process::id()));
+        let path = klik_core::control::socket_path(&dir);
+        serve(&path, sharing().0).unwrap();
+        assert_eq!(
+            asked(&path, &Request::Profiles),
+            Some(Reply::Profiles {
+                profiles: vec![
+                    ProfileEntry {
+                        name: "reading".to_string(),
+                        extends: None,
+                        active: true
+                    },
+                    ProfileEntry {
+                        name: "media".to_string(),
+                        extends: Some("base".to_string()),
+                        active: false
+                    },
+                ],
+                why: "the one profile".to_string(),
+            })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A client that went away is dropped at the next line, and the others
     /// keep receiving.
     #[test]
     fn a_dead_subscriber_is_dropped_and_the_others_keep_the_stream() {
-        let shared = Shared::new(status());
+        let shared = sharing().0;
         let (alive, receiver) = channel();
         let (dead, gone) = channel();
         drop(gone);
@@ -183,7 +337,7 @@ mod tests {
     fn status_and_events_round_trip_over_the_socket() {
         let dir = std::env::temp_dir().join(format!("klik-control-test-{}", std::process::id()));
         let path = klik_core::control::socket_path(&dir);
-        let shared = Shared::new(status());
+        let shared = sharing().0;
         serve(&path, shared.clone()).unwrap();
         let mut got = None;
         ask(&path, &Request::Status, |reply| {
@@ -224,7 +378,7 @@ mod tests {
         let path = klik_core::control::socket_path(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let _first = UnixListener::bind(&path).unwrap();
-        let error = serve(&path, Shared::new(status())).unwrap_err();
+        let error = serve(&path, sharing().0).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
         assert!(
             UnixStream::connect(&path).is_ok(),
@@ -241,7 +395,7 @@ mod tests {
         let path = klik_core::control::socket_path(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         drop(UnixListener::bind(&path).unwrap());
-        serve(&path, Shared::new(status())).unwrap();
+        serve(&path, sharing().0).unwrap();
         let mut got = None;
         ask(&path, &Request::Status, |reply| {
             got = Some(reply);

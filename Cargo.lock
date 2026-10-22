@@ -535,7 +535,9 @@ dependencies = [
  "klik-beauty-r1",
  "klik-core",
  "klik-input",
+ "klik-kwin",
  "klik-linux",
+ "klik-script",
  "serde_json",
  "toml",
 ]

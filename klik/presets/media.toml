@@ -1,0 +1,7 @@
+# Volume with Up and Down, play and pause on the center, tracks with Left and Right.
+[profiles.media.bindings]
+"beauty-r1.up:tap"     = { action = "input.key", key = "KEY_VOLUMEUP" }
+"beauty-r1.down:tap"   = { action = "input.key", key = "KEY_VOLUMEDOWN" }
+"beauty-r1.center:tap" = { action = "input.key", key = "KEY_PLAYPAUSE" }
+"beauty-r1.left:tap"   = { action = "input.key", key = "KEY_PREVIOUSSONG" }
+"beauty-r1.right:tap"  = { action = "input.key", key = "KEY_NEXTSONG" }

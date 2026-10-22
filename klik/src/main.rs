@@ -1,6 +1,7 @@
 mod control;
 mod daemon;
 mod journal;
+mod preset;
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -62,8 +63,26 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         wait: u64,
     },
+    /// List the presets, or add one to the configuration as a profile to edit.
+    Preset {
+        #[command(subcommand)]
+        action: PresetArg,
+    },
     /// Print the udev rule for the devices of the configuration and how to install it.
     InstallUdev {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PresetArg {
+    /// Name every preset and what it is for.
+    List,
+    /// Add the profile of a preset to the end of the configuration.
+    Apply {
+        name: String,
+        /// Defaults to `$XDG_CONFIG_HOME/klik/klik.toml`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -89,6 +108,17 @@ fn main() -> anyhow::Result<()> {
             },
         }),
         Command::Profiles => ask(&Request::Profiles),
+        Command::Preset {
+            action: PresetArg::List,
+        } => {
+            for (name, text) in preset::PRESETS {
+                println!("{name}: {}", preset::describe(text));
+            }
+            Ok(())
+        }
+        Command::Preset {
+            action: PresetArg::Apply { name, config },
+        } => apply_preset(&name, &config.unwrap_or_else(default_config_path)),
         Command::Facts { wait } => {
             std::thread::sleep(Duration::from_secs(wait));
             ask(&Request::Facts)
@@ -372,6 +402,32 @@ fn ask(request: &Request) -> anyhow::Result<()> {
             socket.display()
         )
     })
+}
+
+/// Adds a preset to the configuration file. The result is written beside the
+/// file and renamed over it, so a failure leaves the file as it was.
+fn apply_preset(name: &str, path: &Path) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "cannot read {}; copy packaging/klik.example.toml there first",
+            path.display()
+        )
+    })?;
+    let result = preset::apply(&text, name)?;
+    let beside = path.with_extension("toml.new");
+    std::fs::write(&beside, &result)
+        .with_context(|| format!("cannot write {}", beside.display()))?;
+    std::fs::rename(&beside, path).with_context(|| format!("cannot replace {}", path.display()))?;
+    println!("added the profile {name} to {}", path.display());
+    if let Ok(config) = klik_core::config::Config::from_toml(&result)
+        && config.order.len() > 1
+        && config.rules.is_empty()
+    {
+        println!(
+            "with more than one profile the configuration needs [[rules]], the last one naming the default"
+        );
+    }
+    Ok(())
 }
 
 fn install_udev(config: &Path) -> anyhow::Result<()> {

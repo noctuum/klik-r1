@@ -1,0 +1,6 @@
+# Page Up on Left and Up, Page Down on Right and Down.
+[profiles.presentation.bindings]
+"beauty-r1.left:tap"  = { action = "input.key", key = "KEY_PAGEUP" }
+"beauty-r1.up:tap"    = { action = "input.key", key = "KEY_PAGEUP" }
+"beauty-r1.right:tap" = { action = "input.key", key = "KEY_PAGEDOWN" }
+"beauty-r1.down:tap"  = { action = "input.key", key = "KEY_PAGEDOWN" }

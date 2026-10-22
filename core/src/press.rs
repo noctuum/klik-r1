@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// profile is code, and its buttons are known when it is written.
 pub type ButtonName = &'static str;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PressKind {
     Tap,

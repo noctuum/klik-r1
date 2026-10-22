@@ -336,4 +336,13 @@ mod tests {
         .expect("refused");
         assert!(error.to_string().contains("[modules.kwin]"), "{error}");
     }
+
+    /// The example in `packaging` is what a new user copies, so it is held to
+    /// what the daemon accepts, down to the names the keyboard declares.
+    #[test]
+    fn the_shipped_example_is_accepted() {
+        let assembled = assemble(include_str!("../../packaging/klik.example.toml"))
+            .expect("the example is accepted");
+        klik_linux::keys::resolve(&assembled.keys).expect("every key of the example is a key");
+    }
 }

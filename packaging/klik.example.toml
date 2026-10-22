@@ -1,0 +1,44 @@
+# The configuration of klik: one file, klik.toml, in $XDG_CONFIG_HOME/klik,
+# which is ~/.config/klik when the variable is not set.
+# Copy this one there and put the address of the remote in.
+
+[devices.beauty-r1]
+# The Bluetooth address of the remote, from `bluetoothctl devices`.
+uniq = "00:00:00:00:00:00"
+# Everything else of this profile has the value measured on one unit:
+# debounce_ms = 45, connect_grace_ms = 500, camera_hold_ms = 200,
+# volume_repeat_ms = 1500, tolerance = 16,
+# center = { x = 1904, y = 1904 }, camera = { x = 2048, y = 3424 }.
+
+# One profile. The daemon refuses a second one, since this build has no rules
+# to choose between them. Up and Down scroll, held or tapped, and the center
+# button sends a key.
+#
+# The actions of this build:
+#   input.key    key = "KEY_1", a kernel key name, or a chord such as
+#                "KEY_LEFTCTRL+KEY_A"; a media key is a key, "KEY_PLAYPAUSE"
+#   input.wheel  direction = "up" or "down", and aim = false to leave the
+#                cursor where it is
+#   input.click  the left button, no parameters
+[profiles.reading.bindings]
+"beauty-r1.up:tap"      = { action = "input.wheel", direction = "up" }
+"beauty-r1.up:hold"     = { action = "input.wheel", direction = "up" }
+"beauty-r1.down:tap"    = { action = "input.wheel", direction = "down" }
+"beauty-r1.down:hold"   = { action = "input.wheel", direction = "down" }
+"beauty-r1.center:tap"  = { action = "input.key", key = "KEY_1" }
+
+# The wheel: 40 units an event, 40 more every 10 events, 120 at most.
+# aim_x and aim_y are the point of the window in front that the cursor is put
+# on before a series of wheel events, as fractions of its width and height.
+# This build has no desktop module to find that window, so the wheel goes
+# where the cursor is.
+[modules.input]
+hi_res_per_event = 40
+hi_res_step = 40
+events_per_step = 10
+hi_res_max = 120
+aim_x = 0.992
+aim_y = 0.3
+
+[debug]
+enabled = true

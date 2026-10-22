@@ -1,0 +1,16 @@
+# What the daemon sends is meant for the desktop session, so it starts after
+# the session is up and stops with it.
+[Unit]
+Description=Klik-R1, a remote as buttons
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/klik daemon
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

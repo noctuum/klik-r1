@@ -1,4 +1,4 @@
-use crate::press::{ButtonName, Recognized};
+use crate::press::{ButtonName, PressKind, Recognized};
 
 /// How far into its gesture each report is, counting the press as 1.
 ///
@@ -16,6 +16,8 @@ use crate::press::{ButtonName, Recognized};
 pub struct Gesture {
     button: Option<ButtonName>,
     events: u32,
+    /// The kind of the last press of each button, counted or not.
+    kinds: Vec<(ButtonName, PressKind)>,
 }
 
 impl Gesture {
@@ -23,11 +25,24 @@ impl Gesture {
         Self::default()
     }
 
+    /// The kind of the last press of `button`, which is the kind its ticks and
+    /// its end belong to.
+    pub fn kind_of(&self, button: &str) -> Option<PressKind> {
+        self.kinds
+            .iter()
+            .find(|(name, _)| *name == button)
+            .map(|(_, kind)| *kind)
+    }
+
     /// The index of this report inside its gesture, or 0 for a report that
     /// is not part of the gesture being counted.
     pub fn note(&mut self, recognized: &Recognized) -> u32 {
         match recognized {
-            Recognized::Press(button, _) => {
+            Recognized::Press(button, kind) => {
+                match self.kinds.iter_mut().find(|(name, _)| name == button) {
+                    Some(entry) => entry.1 = *kind,
+                    None => self.kinds.push((*button, *kind)),
+                }
                 if self.button.is_some() && self.button != Some(*button) {
                     return 0;
                 }
@@ -131,6 +146,20 @@ mod tests {
         gesture.note(&Recognized::Tick("up"));
         gesture.note(&Recognized::End("left"));
         assert_eq!(gesture.note(&Recognized::Tick("up")), 3);
+    }
+
+    /// A tick and an end are looked up under the kind of their own button's
+    /// press, which a press of another button in the middle does not change.
+    #[test]
+    fn the_kind_of_a_button_is_that_of_its_last_press() {
+        let mut gesture = Gesture::new();
+        assert_eq!(gesture.kind_of("up"), None);
+        gesture.note(&Recognized::Press("up", PressKind::Hold));
+        gesture.note(&Recognized::Press("left", PressKind::Tap));
+        assert_eq!(gesture.kind_of("up"), Some(PressKind::Hold));
+        assert_eq!(gesture.kind_of("left"), Some(PressKind::Tap));
+        gesture.note(&Recognized::Press("up", PressKind::Tap));
+        assert_eq!(gesture.kind_of("up"), Some(PressKind::Tap));
     }
 
     /// A refused press belongs to no gesture. Counted as a press of its

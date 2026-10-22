@@ -1,4 +1,5 @@
 pub mod config;
+pub mod control;
 pub mod device;
 pub mod error;
 pub mod gesture;

@@ -1,0 +1,247 @@
+use std::io::{self, Read};
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use klik_core::platform::{Process, Run};
+
+/// How often a program whose streams have ended is asked whether it has.
+const TICK: Duration = Duration::from_micros(200);
+
+/// How often the watcher of a detached program asks whether it has ended.
+const WATCH: Duration = Duration::from_millis(10);
+
+type Stream = Receiver<io::Result<Vec<u8>>>;
+
+/// The `Process` of Linux: `std::process` with a reader thread per stream,
+/// so that a program printing more than a pipe holds does not stand still.
+#[derive(Debug, Default)]
+pub struct Runner;
+
+fn command(run: &Run) -> Command {
+    let mut command = Command::new(&run.program);
+    command
+        .args(&run.args)
+        .envs(run.env.iter().map(|(key, value)| (key, value)))
+        .stdin(Stdio::null());
+    command
+}
+
+impl Process for Runner {
+    fn output(&mut self, run: &Run) -> io::Result<Output> {
+        let mut child = command(run)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let deadline = Instant::now() + run.limit;
+        let stdout = drained(child.stdout.take());
+        let stderr = drained(child.stderr.take());
+        match ended(&mut child, &stdout, &stderr, deadline) {
+            Ok(Some(output)) => Ok(output),
+            Ok(None) => {
+                discard(child);
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{} did not return within {} ms and was killed",
+                        run.program,
+                        run.limit.as_millis()
+                    ),
+                ))
+            }
+            Err(error) => {
+                discard(child);
+                Err(error)
+            }
+        }
+    }
+
+    /// The output of the program goes where the daemon's goes, which for the
+    /// service is the journal.
+    fn spawn(&mut self, run: &Run, report: Box<dyn FnOnce(String) + Send>) -> io::Result<()> {
+        let mut child = command(run).spawn()?;
+        let program = run.program.clone();
+        let limit = run.limit;
+        let deadline = Instant::now() + limit;
+        thread::spawn(move || {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if let Some(line) = failure(&program, status) {
+                            report(line);
+                        }
+                        return;
+                    }
+                    Ok(None) if Instant::now() >= deadline => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        report(format!(
+                            "{program} did not end within {} ms and was killed",
+                            limit.as_millis()
+                        ));
+                        return;
+                    }
+                    Ok(None) => thread::sleep(WATCH),
+                    Err(error) => {
+                        report(format!("{program} could not be waited for: {error}"));
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
+/// What a program that ended badly is reported as, and nothing for one that
+/// succeeded.
+fn failure(program: &str, status: ExitStatus) -> Option<String> {
+    if status.success() {
+        return None;
+    }
+    Some(match (status.code(), status.signal()) {
+        (Some(code), _) => format!("{program} exited with {code}"),
+        (None, Some(signal)) => format!("{program} ended on signal {signal}"),
+        (None, None) => format!("{program} ended with {status}"),
+    })
+}
+
+/// Reads a stream of the child to its end on a thread of its own. A pipe
+/// holds 64 KiB, and a program that prints more stands still until it is
+/// read, so the reading cannot wait for the program to end.
+fn drained<R: Read + Send + 'static>(stream: Option<R>) -> Stream {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = match stream {
+            Some(mut stream) => stream.read_to_end(&mut bytes).map(|_| bytes),
+            None => Ok(bytes),
+        };
+        let _ = sender.send(read);
+    });
+    receiver
+}
+
+/// What the child printed and how it ended, or `None` at the deadline.
+///
+/// The end of both streams is not the end of the program. One that exits
+/// closes them a moment before it can be waited for, and one that closed
+/// them itself may go on, so the program is asked until the deadline.
+fn ended(
+    child: &mut Child,
+    stdout: &Stream,
+    stderr: &Stream,
+    deadline: Instant,
+) -> io::Result<Option<Output>> {
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let Ok(stdout) = stdout.recv_timeout(left()) else {
+        return Ok(None);
+    };
+    let Ok(stderr) = stderr.recv_timeout(left()) else {
+        return Ok(None);
+    };
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(Output {
+                status,
+                stdout: stdout?,
+                stderr: stderr?,
+            }));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(TICK);
+    }
+}
+
+/// Kills the child and waits for it on a thread of its own: a program that
+/// did not end in time is not given the loop to die in.
+fn discard(mut child: Child) {
+    let _ = child.kill();
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(program: &str, args: &[&str], limit_ms: u64) -> Run {
+        Run {
+            program: program.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: vec![],
+            limit: Duration::from_millis(limit_ms),
+        }
+    }
+
+    #[test]
+    fn output_gives_what_the_program_printed() {
+        let out = Runner.output(&run("printf", &["hi"], 2000)).unwrap();
+        assert_eq!(out.stdout, b"hi");
+    }
+
+    #[test]
+    fn output_passes_the_environment() {
+        let mut r = run("sh", &["-c", "printf %s \"$KLIK_TEST\""], 2000);
+        r.env = vec![("KLIK_TEST".to_string(), "ok".to_string())];
+        assert_eq!(Runner.output(&r).unwrap().stdout, b"ok");
+    }
+
+    #[test]
+    fn output_kills_a_program_past_its_limit() {
+        let started = Instant::now();
+        let error = Runner.output(&run("sleep", &["5"], 100)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("100 ms"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    fn reported(r: Run) -> Result<String, mpsc::RecvTimeoutError> {
+        let (tx, rx) = mpsc::channel();
+        Runner
+            .spawn(
+                &r,
+                Box::new(move |line| {
+                    let _ = tx.send(line);
+                }),
+            )
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(3))
+    }
+
+    #[test]
+    fn spawn_reports_a_failure() {
+        let line = reported(run("sh", &["-c", "exit 3"], 2000)).unwrap();
+        assert!(line.contains("exited with 3"), "{line}");
+    }
+
+    #[test]
+    fn spawn_reports_a_program_killed_at_its_limit() {
+        let line = reported(run("sleep", &["5"], 100)).unwrap();
+        assert!(line.contains("killed"), "{line}");
+    }
+
+    /// The watcher drops `report` without calling it, so the channel
+    /// disconnects rather than timing out.
+    #[test]
+    fn spawn_says_nothing_of_a_success() {
+        assert_eq!(
+            reported(run("true", &[], 2000)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn spawn_returns_before_the_program_ends() {
+        let started = Instant::now();
+        Runner
+            .spawn(&run("sleep", &["1"], 5000), Box::new(|_| {}))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+}

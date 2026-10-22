@@ -52,3 +52,23 @@ pub trait Injector {
     fn place(&mut self, x: i32, y: i32) -> io::Result<()>;
     fn click(&mut self) -> io::Result<()>;
 }
+
+/// A program to run, and how long it may take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Added to the environment of the daemon.
+    pub env: Vec<(String, String)>,
+    pub limit: std::time::Duration,
+}
+
+/// Programs run with a limit, as every helper and every script is.
+pub trait Process {
+    /// Runs to the end and returns what it printed. A program still running
+    /// at the limit is killed, and the call fails with `ErrorKind::TimedOut`.
+    fn output(&mut self, run: &Run) -> io::Result<std::process::Output>;
+    /// Starts the program and returns. `report` is called at most once, from
+    /// another thread, when the program fails or is killed at the limit.
+    fn spawn(&mut self, run: &Run, report: Box<dyn FnOnce(String) + Send>) -> io::Result<()>;
+}

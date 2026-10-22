@@ -11,8 +11,10 @@ uniq = "00:00:00:00:00:00"
 # center = { x = 1904, y = 1904 }, camera = { x = 2048, y = 3424 }.
 
 # One profile. The daemon refuses a second one, since this build has no rules
-# to choose between them. Up and Down scroll, held or tapped, and the center
-# button sends a key.
+# to choose between them. Up and Down scroll, and the center button sends a
+# key. A held Up or Down is its tap followed by ticks, so the tap binding
+# keeps the wheel turning for as long as the button is held; neither has a
+# hold of its own.
 #
 # The actions of this build:
 #   input.key    key = "KEY_1", a kernel key name, or a chord such as
@@ -22,9 +24,7 @@ uniq = "00:00:00:00:00:00"
 #   input.click  the left button, no parameters
 [profiles.reading.bindings]
 "beauty-r1.up:tap"      = { action = "input.wheel", direction = "up" }
-"beauty-r1.up:hold"     = { action = "input.wheel", direction = "up" }
 "beauty-r1.down:tap"    = { action = "input.wheel", direction = "down" }
-"beauty-r1.down:hold"   = { action = "input.wheel", direction = "down" }
 "beauty-r1.center:tap"  = { action = "input.key", key = "KEY_1" }
 
 # The wheel: 40 units an event, 40 more every 10 events, 120 at most.

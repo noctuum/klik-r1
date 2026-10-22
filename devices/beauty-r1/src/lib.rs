@@ -12,19 +12,22 @@ use button::Button;
 use recognizer::{Outcome, Recognizer, RecognizerSettings};
 use signature::Signature;
 
-/// The six buttons of the remote. The center has no hold, measured on
-/// 2026-09-16; the arrows stream while held and the camera holds `BTN_TOUCH`.
+/// The six buttons of the remote. A hold is what Left and Right report with
+/// their volume keys and what the camera reports with `BTN_TOUCH` held down.
+/// A held Up or Down keeps streaming its swipe, which is its tap followed by
+/// ticks, so neither has a hold. The center has no hold at all, measured on
+/// 2026-09-16.
 pub const BUTTONS: [ButtonSpec; 6] = [
     ButtonSpec {
         name: "up",
         tap: true,
-        hold: true,
+        hold: false,
         ticks: true,
     },
     ButtonSpec {
         name: "down",
         tap: true,
-        hold: true,
+        hold: false,
         ticks: true,
     },
     ButtonSpec {
@@ -296,6 +299,18 @@ mod tests {
         let settings = Settings::from_table(&table(r#"uniq = "aa:bb:cc:dd:ee:01""#)).unwrap();
         assert_eq!(settings.recognizer, DEFAULT_RECOGNIZER);
         assert_eq!(settings.signatures, default_signatures());
+    }
+
+    /// A held Up or Down keeps streaming its swipe, which the recognizer
+    /// reports as a tap and then ticks. Declared with a hold, `up:hold` would
+    /// pass the configuration and never fire.
+    #[test]
+    fn up_and_down_have_a_tap_and_no_hold() {
+        for name in ["up", "down"] {
+            let spec = klik_core::device::button_spec(&BUTTONS, name).unwrap();
+            assert!(spec.produces(PressKind::Tap), "{name}");
+            assert!(!spec.produces(PressKind::Hold), "{name}");
+        }
     }
 
     #[test]

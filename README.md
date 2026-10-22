@@ -54,7 +54,7 @@ The service logs to the journal, read with `journalctl --user -u klik`. It alway
 
 ## Configuration
 
-`packaging/klik.example.toml` is a complete configuration with a comment on each part, and a test holds it to what the daemon accepts. A binding is keyed `"<device>.<button>:<kind>"`. The device is the name of its section under `[devices]`. The buttons of the Beauty-R1 are `up`, `down`, `left`, `right`, `center` and `camera`, and the kind is `tap` or `hold`. The center has no hold, so a binding for `center:hold` is refused.
+`packaging/klik.example.toml` is a complete configuration with a comment on each part, and a test holds it to what the daemon accepts. A binding is keyed `"<device>.<button>:<kind>"`. The device is the name of its section under `[devices]`. The buttons of the Beauty-R1 are `up`, `down`, `left`, `right`, `center` and `camera`, and the kind is `tap` or `hold`. A hold exists for Left, Right and the camera. A held Up or Down is its tap followed by ticks, so a wheel bound to `up:tap` turns for as long as Up is held. A binding for `up:hold`, `down:hold` or `center:hold` is refused.
 
 ## Command line
 

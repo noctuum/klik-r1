@@ -59,6 +59,9 @@ pub struct Input {
     /// Whether this series was told that no desktop aims the cursor, so the
     /// journal says it once per series and not per event.
     said_no_desktop: bool,
+    /// Whether the journal said why an aim failed, since the last aim that
+    /// did not fail. A desktop that keeps failing is said once.
+    said_failed_aim: bool,
 }
 
 impl Default for Input {
@@ -73,6 +76,7 @@ impl Input {
             scroll: ScrollSettings::default(),
             series: Series::new(),
             said_no_desktop: false,
+            said_failed_aim: false,
         }
     }
 
@@ -122,8 +126,19 @@ impl Input {
             .unwrap_or(true);
         if self.series.needs_aim(press.at) {
             self.said_no_desktop = false;
+            // A failed aim leaves the cursor where it is, and the wheel turns
+            // all the same.
             if aim {
-                self.aim(services)?;
+                match self.aim(services) {
+                    Ok(()) => self.said_failed_aim = false,
+                    Err(fault) if !self.said_failed_aim => {
+                        self.said_failed_aim = true;
+                        services
+                            .journal
+                            .line(&format!("the wheel goes where the cursor is: {fault}"));
+                    }
+                    Err(_) => {}
+                }
             }
         }
         self.series.note(press.at);
@@ -222,7 +237,7 @@ impl Module for Input {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use klik_core::module::{Journal, Rect};
+    use klik_core::module::{Desktop, Journal, Rect, Step, Window, WindowMatch};
     use klik_core::platform::{Injector, Process, Run};
     use klik_core::select::Selection;
     use std::io;
@@ -300,7 +315,44 @@ mod tests {
         }
     }
 
+    /// A desktop every call of which fails, as in a session without KWin or
+    /// without `kdotool`. It answers nothing but the failure.
+    struct Broken;
+
+    fn broken() -> io::Error {
+        io::Error::other("kdotool could not be started")
+    }
+
+    impl Desktop for Broken {
+        fn front(&mut self) -> io::Result<Option<Window>> {
+            Err(broken())
+        }
+        fn screen(&mut self) -> io::Result<Rect> {
+            Err(broken())
+        }
+        fn switch(&mut self, _: Step) -> io::Result<()> {
+            Err(broken())
+        }
+        fn activate(&mut self, _: &WindowMatch) -> io::Result<()> {
+            Err(broken())
+        }
+        fn current_desktop(&mut self) -> io::Result<String> {
+            Err(broken())
+        }
+    }
+
     fn run(
+        input: &mut Input,
+        action: &str,
+        params: &str,
+        event: PressEvent,
+        at: f64,
+    ) -> (Vec<String>, Vec<String>) {
+        run_on(None, input, action, params, event, at)
+    }
+
+    fn run_on(
+        desktop: Option<&mut Broken>,
         input: &mut Input,
         action: &str,
         params: &str,
@@ -313,7 +365,7 @@ mod tests {
         let mut services = Services {
             input: &mut recorder,
             journal: &mut lines,
-            desktop: None,
+            desktop: desktop.map(|desktop| desktop as &mut dyn Desktop),
             process: &mut Unused,
             profiles: &mut selection,
         };
@@ -394,6 +446,34 @@ mod tests {
             2.0,
         );
         assert_eq!(down, ["wheel -40"]);
+    }
+
+    /// A desktop that cannot name the window in front leaves the cursor
+    /// where it is, and the wheel turns all the same. The journal says why
+    /// once, and again only after an aim that did not fail.
+    #[test]
+    fn a_failed_aim_turns_the_wheel_where_the_cursor_is_and_says_why_once() {
+        let mut input = Input::new();
+        let up = r#"direction = "up""#;
+        let said = "the wheel goes where the cursor is: kdotool could not be started";
+        let start = PressEvent::Start(PressKind::Tap);
+        let (calls, lines) = run_on(Some(&mut Broken), &mut input, "wheel", up, start, 1.0);
+        assert_eq!(calls, ["wheel 40"]);
+        assert_eq!(lines, [said]);
+        let tick = PressEvent::Tick { nth: 2 };
+        let (calls, lines) = run_on(Some(&mut Broken), &mut input, "wheel", up, tick, 1.03);
+        assert_eq!(calls, ["wheel 40"]);
+        assert!(lines.is_empty(), "no second aim inside the series");
+        let (calls, lines) = run_on(Some(&mut Broken), &mut input, "wheel", up, start, 3.0);
+        assert_eq!(calls, ["wheel 40"]);
+        assert!(lines.is_empty(), "the next series fails in silence");
+        let (_, lines) = run_on(None, &mut input, "wheel", up, start, 5.0);
+        assert_eq!(
+            lines,
+            ["no desktop module, the wheel goes where the cursor is"]
+        );
+        let (_, lines) = run_on(Some(&mut Broken), &mut input, "wheel", up, start, 7.0);
+        assert_eq!(lines, [said], "said again after an aim that did not fail");
     }
 
     #[test]

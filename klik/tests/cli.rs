@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -122,13 +122,17 @@ fn replay_fails_loudly_on_a_missing_file() {
 fn refused(name: &str, config: &str) -> String {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&dir).expect("the directory is made");
+    refused_in(&dir, config)
+}
+
+fn refused_in(dir: &Path, config: &str) -> String {
     let path = dir.join("klik.toml");
     std::fs::write(&path, config).expect("the configuration is written");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_klik"))
         .args(["daemon", "--config"])
         .arg(&path)
-        .env("XDG_RUNTIME_DIR", &dir)
+        .env("XDG_RUNTIME_DIR", dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -170,4 +174,27 @@ fn a_configuration_with_two_profiles_names_the_rule_it_lacks() {
         "[devices.beauty-r1]\nuniq = \"aa\"\n[profiles.a]\n[profiles.b]\n",
     );
     assert!(stderr.contains("[[rules]]"), "{stderr}");
+}
+
+/// A daemon already answers on the control socket, so a second one is refused
+/// before it declares a keyboard. The configuration names a key nobody knows,
+/// and the refusal is still the one of the socket.
+#[test]
+fn a_second_daemon_is_refused_before_it_declares_a_keyboard() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("second-daemon");
+    let socket = klik_core::control::socket_path(&dir);
+    std::fs::create_dir_all(socket.parent().expect("the socket has a directory"))
+        .expect("the directory is made");
+    let _ = std::fs::remove_file(&socket);
+    let _first = std::os::unix::net::UnixListener::bind(&socket).expect("the first daemon listens");
+    let stderr = refused_in(
+        &dir,
+        r#"
+        [devices.beauty-r1]
+        uniq = "aa"
+        [profiles.one.bindings]
+        "beauty-r1.center:tap" = { action = "input.key", key = "KEY_NOPE" }
+        "#,
+    );
+    assert!(stderr.contains("another daemon answers"), "{stderr}");
 }

@@ -111,6 +111,14 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         keys,
     } = assembled;
     set_debug(config.debug.enabled);
+    // The socket comes first: a daemon that already answers on it holds the
+    // remote, and a second one is refused before it declares a keyboard.
+    let shared = Shared::new(status);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .context("XDG_RUNTIME_DIR is not set, so there is no place for the control socket")?;
+    let socket = klik_core::control::socket_path(Path::new(&runtime));
+    serve(&socket, shared.clone())
+        .with_context(|| format!("cannot listen on {}", socket.display()))?;
     let mut injector = Uinput::new(&keys).context("cannot create the keyboard and the pointer")?;
     let poll_ms = profiles
         .iter()
@@ -119,12 +127,6 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         .unwrap_or(100);
     let mut source =
         Source::new(profiles.len(), poll_ms, true).context("cannot watch the input devices")?;
-    let shared = Shared::new(status);
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .context("XDG_RUNTIME_DIR is not set, so there is no place for the control socket")?;
-    let socket = klik_core::control::socket_path(Path::new(&runtime));
-    serve(&socket, shared.clone())
-        .with_context(|| format!("cannot listen on {}", socket.display()))?;
     klik_linux::stop::install().context("cannot catch SIGTERM and SIGINT")?;
     let mut journal = Stderr;
     let mut gestures: Vec<Gesture> = ids.iter().map(|_| Gesture::new()).collect();

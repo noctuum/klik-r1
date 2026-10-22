@@ -69,7 +69,7 @@ The service logs to the journal, read with `journalctl --user -u klik`. It alway
 
 `--config` defaults to `$XDG_CONFIG_HOME/klik/klik.toml`, and to `~/.config/klik/klik.toml` when the variable is not set.
 
-`status` and `events` reach the daemon through the socket `$XDG_RUNTIME_DIR/klik/control`, which only its owner can open. A line of `events` reads `<time> <device> <button> <kind>: came to <module>.<action>, <n> ms`, with the time in UTC. A press bound to nothing came to `nothing`. A press the quiet window refuses and a gesture that matches no button get a line as well.
+`status` and `events` reach the daemon through the socket `$XDG_RUNTIME_DIR/klik/control`, which only its owner can open. A second daemon refuses to start while one answers on that socket. A line of `events` reads `<time> <device> <button> <kind>: came to <module>.<action>, <n> ms`, with the time in UTC. A press bound to nothing came to `nothing`. A press the quiet window refuses and a gesture that matches no button get a line as well.
 
 `replay` needs no device. Over the clean capture run it prints:
 

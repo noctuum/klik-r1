@@ -43,11 +43,20 @@ impl Shared {
     }
 }
 
-/// Binds the socket, with the stale file of a daemon that did not clean up
-/// removed first, and serves each client on a thread of its own.
+/// Binds the socket and serves each client on a thread of its own.
+///
+/// A socket a daemon answers on is refused: removing its file would leave that
+/// daemon unreachable while it goes on holding the remote. A file nobody
+/// answers on is the stale one of a daemon that did not clean up, and goes.
 pub fn serve(path: &Path, shared: Shared) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
+    }
+    if UnixStream::connect(path).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "another daemon answers on this socket",
+        ));
     }
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
@@ -204,6 +213,42 @@ mod tests {
                 line: "center tap: came to input.key, 2 ms".to_string()
             }]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A daemon that answers on the socket keeps it. Removing the file would
+    /// leave that daemon unreachable while it goes on holding the remote.
+    #[test]
+    fn a_socket_a_daemon_answers_on_is_refused() {
+        let dir = std::env::temp_dir().join(format!("klik-control-live-{}", std::process::id()));
+        let path = klik_core::control::socket_path(&dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _first = UnixListener::bind(&path).unwrap();
+        let error = serve(&path, Shared::new(status())).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(
+            UnixStream::connect(&path).is_ok(),
+            "the file still leads to the first daemon"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file nobody answers on is what a daemon that did not clean up leaves
+    /// behind, and the next daemon takes its place.
+    #[test]
+    fn a_socket_file_nobody_answers_on_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("klik-control-stale-{}", std::process::id()));
+        let path = klik_core::control::socket_path(&dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        drop(UnixListener::bind(&path).unwrap());
+        serve(&path, Shared::new(status())).unwrap();
+        let mut got = None;
+        ask(&path, &Request::Status, |reply| {
+            got = Some(reply);
+            false
+        })
+        .unwrap();
+        assert_eq!(got, Some(Reply::Status(status())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

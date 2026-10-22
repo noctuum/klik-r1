@@ -1,19 +1,37 @@
 use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use klik_core::platform::{Process, Run};
 
-/// How often a program whose streams have ended is asked whether it has.
+/// How often a program run for its output is asked whether it has ended,
+/// over its first `QUICK`: a helper returns within a few milliseconds.
 const TICK: Duration = Duration::from_micros(200);
+
+/// How long a program run for its output is asked at the pace of `TICK`;
+/// after that it is asked at the pace of `WATCH`.
+const QUICK: Duration = Duration::from_millis(50);
 
 /// How often the watcher of a detached program asks whether it has ended.
 const WATCH: Duration = Duration::from_millis(10);
 
-type Stream = Receiver<io::Result<Vec<u8>>>;
+/// How long the streams of a program that has ended get to reach their end.
+/// What it printed is in the pipes already, and a program it left behind in
+/// the background can hold them open for as long as that one runs.
+const GRACE: Duration = Duration::from_millis(20);
+
+/// What a reader thread has read of one stream of the child so far, and how
+/// the stream ended once it has.
+#[derive(Default)]
+struct Taken {
+    bytes: Vec<u8>,
+    end: Option<io::Result<()>>,
+}
+
+type Stream = Arc<Mutex<Taken>>;
 
 /// The `Process` of Linux: `std::process` with a reader thread per stream,
 /// so that a program printing more than a pipe holds does not stand still.
@@ -119,52 +137,83 @@ fn failure(program: &str, status: ExitStatus) -> Option<String> {
     })
 }
 
-/// Reads a stream of the child to its end on a thread of its own. A pipe
-/// holds 64 KiB, and a program that prints more stands still until it is
-/// read, so the reading cannot wait for the program to end.
+/// Reads a stream of the child on a thread of its own and keeps what it has
+/// read so far. A pipe holds 64 KiB, and a program that prints more stands
+/// still until it is read, so the reading cannot wait for the program to
+/// end. A program left behind in the background keeps the thread until it
+/// ends.
 fn drained<R: Read + Send + 'static>(stream: Option<R>) -> Stream {
-    let (sender, receiver) = mpsc::channel();
+    let shared = Stream::default();
+    let taken = Arc::clone(&shared);
     thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = match stream {
-            Some(mut stream) => stream.read_to_end(&mut bytes).map(|_| bytes),
-            None => Ok(bytes),
+        let end = match stream {
+            Some(mut stream) => read_into(&mut stream, &taken),
+            None => Ok(()),
         };
-        let _ = sender.send(read);
+        lock(&taken).end = Some(end);
     });
-    receiver
+    shared
+}
+
+fn read_into(stream: &mut impl Read, taken: &Mutex<Taken>) -> io::Result<()> {
+    let mut buffer = [0; 8192];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => lock(taken).bytes.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn lock(taken: &Mutex<Taken>) -> MutexGuard<'_, Taken> {
+    taken.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What a stream gave so far, or the error that ended it.
+fn taken(stream: &Stream) -> io::Result<Vec<u8>> {
+    let mut taken = lock(stream);
+    match taken.end.take() {
+        Some(Err(error)) => Err(error),
+        _ => Ok(std::mem::take(&mut taken.bytes)),
+    }
 }
 
 /// What the child printed and how it ended, or `None` at the deadline.
 ///
-/// The end of both streams is not the end of the program. One that exits
-/// closes them a moment before it can be waited for, and one that closed
-/// them itself may go on, so the program is asked until the deadline.
+/// The end of the streams and the end of the program are two events. One
+/// that exits closes them a moment before it can be waited for; one that
+/// closed them itself may go on; and one that left a program behind in the
+/// background, as `sh -c "a &"` does, has ended while that program holds
+/// them open. So the program is asked until the deadline, and once it has
+/// ended its streams get `GRACE` to reach their end.
 fn ended(
     child: &mut Child,
     stdout: &Stream,
     stderr: &Stream,
     deadline: Instant,
 ) -> io::Result<Option<Output>> {
-    let left = || deadline.saturating_duration_since(Instant::now());
-    let Ok(stdout) = stdout.recv_timeout(left()) else {
-        return Ok(None);
-    };
-    let Ok(stderr) = stderr.recv_timeout(left()) else {
-        return Ok(None);
-    };
+    let begun = Instant::now();
+    let mut exited: Option<(ExitStatus, Instant)> = None;
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(Output {
-                status,
-                stdout: stdout?,
-                stderr: stderr?,
-            }));
+        if exited.is_none() {
+            exited = child.try_wait()?.map(|status| (status, Instant::now()));
+        }
+        if let Some((status, at)) = exited {
+            let closed = lock(stdout).end.is_some() && lock(stderr).end.is_some();
+            if closed || at.elapsed() >= GRACE {
+                return Ok(Some(Output {
+                    status,
+                    stdout: taken(stdout)?,
+                    stderr: taken(stderr)?,
+                }));
+            }
         }
         if Instant::now() >= deadline {
             return Ok(None);
         }
-        thread::sleep(TICK);
+        thread::sleep(if begun.elapsed() < QUICK { TICK } else { WATCH });
     }
 }
 
@@ -180,6 +229,7 @@ fn discard(mut child: Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn run(program: &str, args: &[&str], limit_ms: u64) -> Run {
         Run {
@@ -210,6 +260,20 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("100 ms"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// `sh -c "sleep 2 & printf hi"` ends at once, and the `sleep` it left
+    /// behind holds both streams open for two seconds more. The command has
+    /// ended, and what it printed is kept.
+    #[test]
+    fn output_returns_when_the_program_ends_though_its_child_keeps_the_streams() {
+        let started = Instant::now();
+        let out = Runner
+            .output(&run("sh", &["-c", "sleep 2 & printf hi"], 1000))
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"hi");
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     /// Without the name the journal says `No such file or directory` and

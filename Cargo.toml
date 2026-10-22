@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "platform/linux", "devices/beauty-r1", "modules/input", "modules/kwin", "klik"]
+members = ["core", "platform/linux", "devices/beauty-r1", "modules/input", "modules/kwin", "modules/script", "klik"]
 
 [workspace.package]
 edition = "2024"

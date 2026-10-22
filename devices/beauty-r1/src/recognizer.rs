@@ -93,7 +93,8 @@ pub struct Recognizer {
     /// there, so pressing it twice in a row leaves the second gesture with no
     /// axis event at all. Matching that second gesture against its own packet
     /// finds nothing; matching it against the position the first one left
-    /// behind finds the button. Measured in `docs/logs/beauty-r1-repeat.log`.
+    /// behind finds the button. Measured in
+    /// `tests/fixtures/beauty-r1-repeats.jsonl`.
     ///
     /// `None` means no value has ever been reported for that axis, which is
     /// true only before the first gesture that moves it. A gesture opening in

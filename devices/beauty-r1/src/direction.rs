@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn up_tap_resolves_on_its_first_delta() {
-        // Measured from docs/logs/beauty-r1-clean-run.log
+        // Measured from tests/fixtures/beauty-r1-clean-run.jsonl
         assert_eq!(
             resolve(Vertical::OnFirstDelta, Axis::Y, 2036, &[2124, 2168, 2212]),
             Some((Button::Up, 1))
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn down_tap_resolves_on_its_first_delta() {
-        // Measured from docs/logs/beauty-r1-clean-run.log
+        // Measured from tests/fixtures/beauty-r1-clean-run.jsonl
         assert_eq!(
             resolve(Vertical::OnFirstDelta, Axis::Y, 2176, &[2088, 2048, 2000]),
             Some((Button::Down, 1))
@@ -153,7 +153,7 @@ mod tests {
     /// The horizontal axis waits for two deltas under either rule.
     #[test]
     fn left_tap_resolves_on_the_second_delta() {
-        // Measured from docs/logs/beauty-r1-clean-run.log
+        // Measured from tests/fixtures/beauty-r1-clean-run.jsonl
         assert_eq!(
             resolve(Vertical::OnFirstDelta, Axis::X, 512, &[650, 948, 1250]),
             Some((Button::Left, 2))
@@ -164,7 +164,7 @@ mod tests {
     /// steps +72 first, so its first delta points at Left.
     #[test]
     fn right_survives_its_opening_step_in_the_wrong_direction() {
-        // Measured from docs/logs/beauty-r1-clean-run.log
+        // Measured from tests/fixtures/beauty-r1-clean-run.jsonl
         assert_eq!(
             resolve(Vertical::OnFirstDelta, Axis::X, 3328, &[3400, 3100, 2800]),
             Some((Button::Right, 3))
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn held_up_resolves_from_its_sixteen_unit_steps() {
-        // Measured from docs/logs/beauty-r1-hold-map.log
+        // Measured on a hold captured on 2026-09-16
         assert_eq!(
             resolve(Vertical::OnFirstDelta, Axis::Y, 784, &[800, 816, 832]),
             Some((Button::Up, 1))
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn held_down_resolves_from_its_sixteen_unit_steps() {
-        // Measured from docs/logs/beauty-r1-hold-map.log
+        // Measured on a hold captured on 2026-09-16
         assert_eq!(
             resolve(Vertical::OnFirstDelta, Axis::Y, 2912, &[2896, 2880, 2864]),
             Some((Button::Down, 1))

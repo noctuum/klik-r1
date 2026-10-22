@@ -935,9 +935,8 @@ fn a_refused_press_names_the_time_since_the_last_release() {
     assert_eq!(third, vec![refused(40)]);
 }
 
-/// `docs/logs/beauty-r1-capabilities.log` shows the remote declaring
-/// `ABS_VOLUME` and `ABS_MISC` beside the two axes. Neither carries a
-/// position, so neither may reach the remembered one.
+/// The remote declares `ABS_VOLUME` and `ABS_MISC` beside the two axes.
+/// Neither carries a position, so neither may reach the remembered one.
 #[test]
 fn another_absolute_axis_does_not_move_the_remembered_position() {
     let mut r = settling(1904, 1904);
@@ -950,8 +949,9 @@ fn another_absolute_axis_does_not_move_the_remembered_position() {
     );
 }
 
-/// The Up tap opens with `ABS_Y` alone (`docs/logs/beauty-r1-clean-run.log`),
-/// and with signatures loaded its first delta resolves it. The opening value
+/// The Up tap opens with `ABS_Y` alone
+/// (`tests/fixtures/beauty-r1-clean-run.jsonl`), and with signatures loaded
+/// its first delta resolves it. The opening value
 /// still has to land on the tracker's own axis, or that delta is spent learning
 /// it and the gesture needs another event.
 #[test]
